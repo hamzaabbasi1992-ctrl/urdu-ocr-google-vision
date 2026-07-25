@@ -391,11 +391,24 @@ Coordination only — zero content/business logic.
 ## 9. Status
 
 Migration to this architecture is in progress, module-by-module, per Section 8's
-workflow discipline. `app/core` still also contains the previous monolithic build
-(2-engine PaddleOCR/Tesseract arbiter) alongside the new modules below; it has not
-been removed yet - that is a separate decision, not yet made (see the new-module
-locations under `app/core/ingestion/`, distinct from the old `app/core/pdf_render.py`).
-The Qaari VLM engine that briefly existed has been removed per Section 3.
+workflow discipline.
+
+**Old monolithic build removed (2026-07-25).** The previous 2-engine
+PaddleOCR/Tesseract-arbiter codebase (`app/core/{ocr,preprocess,exporters,
+pdf_render,segmentation,benchmark,control,job,job_queue,logging_setup,
+model_manager,models,postprocess}.py`, `app/gui/`, `app/workers/`, `app/cli.py`,
+`app/main.py`, `Start.bat`) has been deleted. Confirmed via grep across the
+active codebase (`app/simple_gui.py`, all new-architecture modules under
+`app/core/`, `tests/`, `tools/`) before deletion that nothing outside the old
+codebase imported from it, except `app/core/paths.py` (kept - used by
+`QaariVLMEngine` for model cache location). `pyproject.toml`'s `[project.scripts]`
+entry point updated from `app.main:main` to `app.simple_gui:main` accordingly.
+The GUI is now exclusively `app/simple_gui.py` (launched via
+`Start Google Vision GUI.bat`); the old `Start.bat` launcher for the deleted
+`app.main`/`app.gui` was removed with it. The Qaari VLM engine that briefly
+existed has been removed per Section 3 (its later re-measured incarnation,
+`QaariVLMEngine` at `app/core/recognition/qaari_engine.py`, is unrelated and
+still present - see the engine comparison table below).
 
 **Completed modules** (implemented + standalone-tested; commit pending - git
 identity is not yet configured for this repo):

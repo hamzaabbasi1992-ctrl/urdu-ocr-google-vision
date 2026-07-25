@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 readme = "README.md"
 
 [project.scripts]
-urdu-ocr = "app.main:main"
+urdu-ocr = "app.simple_gui:main"
 
 [tool.setuptools.packages.find]
 include = ["app*"]
