@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+*.log
+tools/test_output/
+tools/synthetic_test.pdf
+tools/synthetic_preview.png
+tools/benchmark_output/
+*credentials*.json
+*-key.json
+credentials/
+Output/
+*.lnk
