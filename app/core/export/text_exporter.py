@@ -4,15 +4,16 @@ Single responsibility: produce output.txt from recognized words. Includes
 mechanical line assembly (grouping already-ordered words by line and
 joining them) since Layer 9 (Post-Processing) is out of scope for the
 minimal pipeline (PROJECT_SPEC.md Section 4/Q9) - words already arrive in
-reading order from PaddleOCREngine, so nothing here reorders or rewrites
-anything, it only joins what's already correctly ordered.
+reading order via assign_reading_order (called by the recognition engine),
+so nothing here reorders or rewrites anything, it only joins what's already
+correctly ordered.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from app.core.recognition.paddle_ocr_engine import RecognizedWord
+from app.core.recognition.recognized_word import RecognizedWord
 
 # Punctuation marks that attach directly to the preceding word with no
 # space, matching normal Urdu/Arabic typesetting - some engines (Google

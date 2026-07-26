@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from app.core.recognition.paddle_ocr_engine import RecognizedWord, assign_reading_order
+from app.core.recognition.recognized_word import RecognizedWord, assign_reading_order
 
 
 class GoogleVisionEngine:

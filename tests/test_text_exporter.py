@@ -7,7 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.core.export.text_exporter import TextExporter, assemble_text
-from app.core.recognition.paddle_ocr_engine import RecognizedWord
+from app.core.recognition.recognized_word import RecognizedWord
 
 
 def _word(text: str, line_index: int) -> RecognizedWord:

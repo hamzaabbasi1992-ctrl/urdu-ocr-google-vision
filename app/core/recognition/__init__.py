@@ -1,5 +1,4 @@
 from app.core.recognition.google_vision_engine import GoogleVisionEngine
-from app.core.recognition.paddle_ocr_engine import PaddleOCREngine, RecognizedWord
-from app.core.recognition.qaari_engine import QaariVLMEngine
+from app.core.recognition.recognized_word import RecognizedWord
 
-__all__ = ["PaddleOCREngine", "RecognizedWord", "QaariVLMEngine", "GoogleVisionEngine"]
+__all__ = ["RecognizedWord", "GoogleVisionEngine"]

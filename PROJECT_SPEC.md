@@ -200,37 +200,66 @@ Each is a pure `image -> image` function. None decide whether they should run; n
 ### Layer 5 — Structure Segmentation
 | Module | Responsibility |
 |---|---|
-| `LineSegmenter` | Split a page image into line bands only. |
 | `BaselineEstimator` | Estimate baseline/x-height band per line. Feeds `DiacriticClassifier` only. |
 | `WordRegionProposer` | Propose word/ligature-cluster regions within a line. Structure only, no recognition. |
+
+**`LineSegmenter` - built, then removed (2026-07-26).** Split a page image
+into line bands; existed solely to feed pre-cropped line images to
+`QaariVLMEngine`/`UTRNetEngine` (both expect one line per call, unlike
+`GoogleVisionEngine`, which recognizes a whole page at once). Deleted along
+with `QaariVLMEngine` - see Layer 6 below - since its only consumer is gone.
+Would need to be rebuilt if a future line-based engine is ever added.
 
 ### Layer 6 — Recognition Engines
 Each engine implements one interface (`region -> text, confidence`) and does nothing else. No engine merges, votes, or judges another. **All engines run on all pages** — there is no "primary engine."
 
 | Module | Responsibility |
 |---|---|
-| `PaddleOCREngine` | Recognize via PaddleOCR only. Measured baseline: CER 0.87, **WER 1.00** on the benchmark fixture - confirms this engine does not work for Nastaleeq. |
-| `TesseractEngine` | Recognize via Tesseract only. |
-| `EasyOCREngine` | Recognize via EasyOCR (Arabic model) only — reference signal, per original spec ("EasyOCR only for comparison"). |
+| `TesseractEngine` | Recognize via Tesseract only. Never built under this architecture (was part of the removed legacy 2-engine arbiter - see Section 9). Still an unproven candidate, pending the same measurement discipline as any other engine. |
+| `EasyOCREngine` | Recognize via EasyOCR (Arabic model) only — reference signal, per original spec ("EasyOCR only for comparison"). Same status as `TesseractEngine`: never built under this architecture. |
 
-**`UTRNetEngine` - deprioritized, not built.** Its real inference code
-(`model.py`/`dataset.py`/`utils.py`/`modules/`, ~900 lines) imports several
-training-only dependencies (`lmdb`, `imgaug`, `matplotlib`, `timm`, `pytz`,
-`six`) just to load the files, even though only the HRNet+BiLSTM+CTC
-inference path would ever be used - exactly the kind of dependency-weight
-problem Section 3 exists to catch. Deprioritized by explicit user decision in
-favor of measuring `QaariVLMEngine` first; remains a candidate if revisited
-(either accept the dependency cost and vendor it fully, or someone commits to
-trimming the code to just the inference path, which carries real risk of
-silently breaking the architecture).
+**`PaddleOCREngine` - built, measured, then removed (2026-07-26).**
+Measured baseline: CER 0.87, **WER 1.00** on the benchmark fixture -
+confirmed this engine does not work for Nastaleeq (see the engine
+comparison table and baseline-benchmark history below, kept as the
+historical record of *why*). Once `GoogleVisionEngine` was adopted as the
+sole engine, the user asked to remove Paddle/Qaari/UTRNet entirely rather
+than keep disqualified code around. `PaddleOCREngine` itself
+(`app/core/recognition/paddle_ocr_engine.py`) and its tests are deleted.
+Its `RecognizedWord`/`assign_reading_order` were engine-agnostic (also used
+by `GoogleVisionEngine` and `TextExporter`) and were split out first, into
+`app/core/recognition/recognized_word.py`, so removing Paddle didn't break
+the working Google Vision path. `app/core/minimal_pipeline.py` (the
+Paddle-based orchestrator) and `tools/run_benchmark.py` were removed with
+it - Google Vision has its own simpler path (`app/simple_gui.py`,
+`tools/run_benchmark_google_vision.py`), so no replacement orchestrator was
+needed.
 
-**`QaariVLMEngine` - being actively measured now, not merely a candidate.**
-Previously added, then removed (Section 3) for lacking a measurement -
-now that PaddleOCR's WER=1.00 result exists as a concrete baseline and the
-benchmark infrastructure exists to measure fairly, this is exactly the
-scenario Section 3's re-adoption clause describes. Re-introduces
-`transformers`/`peft`/`accelerate`/`qwen-vl-utils`, justified this time by an
-in-progress measurement against the same fixture, not a vendor claim.
+**`UTRNetEngine` - deprioritized, never built, now dropped as a candidate
+(2026-07-26).** Its real inference code (`model.py`/`dataset.py`/`utils.py`/
+`modules/`, ~900 lines) would have imported several training-only
+dependencies (`lmdb`, `imgaug`, `matplotlib`, `timm`, `pytz`, `six`) just to
+load the files, even though only the HRNet+BiLSTM+CTC inference path would
+ever be used - exactly the kind of dependency-weight problem Section 3
+exists to catch. Originally deprioritized in favor of measuring
+`QaariVLMEngine` first; dropped outright, by explicit user decision, once
+`GoogleVisionEngine` proved sufficient and the user chose to standardize on
+it rather than keep evaluating offline alternatives. No code ever existed
+for this engine, so there was nothing to delete - this note just records
+that it's no longer a live candidate. Could be revisited from scratch if
+the cloud trade-off (Section 2, rule 4) is ever reversed.
+
+**`QaariVLMEngine` - built, measured, disqualified, then removed
+(2026-07-26).** Measured CER 0.9577, WER 1.0000 - paraphrased into English
+instead of transcribing (violates the "never rewrite" rule, Section 2) and
+was ~600x too slow (1988.7s/page). Kept in the codebase for a time as a
+measured, documented-disqualified candidate; deleted along with
+`PaddleOCREngine` once the user decided to drop all non-Google-Vision
+engines rather than keep disqualified code around.
+`app/core/recognition/qaari_engine.py`, `tests/test_qaari_engine.py`,
+`tools/run_benchmark_qaari.py`, and its sole consumer of Layer 5's
+`LineSegmenter` (see above) are all deleted. `app/core/paths.py`
+(`model_cache_dir`, only ever used by this engine) was deleted with it.
 
 **`GoogleVisionEngine` - built and measured; the strongest result so far.**
 Recognizes via Google Cloud Vision's `DOCUMENT_TEXT_DETECTION`
@@ -400,15 +429,24 @@ model_manager,models,postprocess}.py`, `app/gui/`, `app/workers/`, `app/cli.py`,
 `app/main.py`, `Start.bat`) has been deleted. Confirmed via grep across the
 active codebase (`app/simple_gui.py`, all new-architecture modules under
 `app/core/`, `tests/`, `tools/`) before deletion that nothing outside the old
-codebase imported from it, except `app/core/paths.py` (kept - used by
-`QaariVLMEngine` for model cache location). `pyproject.toml`'s `[project.scripts]`
-entry point updated from `app.main:main` to `app.simple_gui:main` accordingly.
-The GUI is now exclusively `app/simple_gui.py` (launched via
-`Start Google Vision GUI.bat`); the old `Start.bat` launcher for the deleted
-`app.main`/`app.gui` was removed with it. The Qaari VLM engine that briefly
-existed has been removed per Section 3 (its later re-measured incarnation,
-`QaariVLMEngine` at `app/core/recognition/qaari_engine.py`, is unrelated and
-still present - see the engine comparison table below).
+codebase imported from it, except `app/core/paths.py` (kept at the time -
+used by `QaariVLMEngine` for model cache location; `app/core/paths.py` was
+itself deleted the next day when `QaariVLMEngine` was removed - see the next
+note below). `pyproject.toml`'s `[project.scripts]` entry point updated from
+`app.main:main` to `app.simple_gui:main` accordingly. The GUI is now
+exclusively `app/simple_gui.py` (launched via `Start Google Vision GUI.bat`);
+the old `Start.bat` launcher for the deleted `app.main`/`app.gui` was removed
+with it.
+
+**Paddle/Qaari/UTRNet engines removed (2026-07-26).** With `GoogleVisionEngine`
+established as the working, sole engine, the user asked to remove
+`PaddleOCREngine`, `QaariVLMEngine`, and the never-built `UTRNetEngine`
+candidate entirely rather than keep disqualified/unused engine code around.
+See the Layer 5 (`LineSegmenter`) and Layer 6 removal notes below for what
+was deleted and why; the historical measurement narrative later in this
+section (engine comparison table, baseline benchmark, DPI sweep) is kept
+intact as the record of *why* each was disqualified, even though the code
+itself is gone.
 
 **Completed modules** (implemented + standalone-tested; commit pending - git
 identity is not yet configured for this repo):
@@ -420,25 +458,31 @@ identity is not yet configured for this repo):
 - Layer 3: `Deskewer` (`app/core/preprocessing/deskewer.py`, `tests/test_deskewer.py`, 5/5 passing) - initial version shipped with a real bug (wrong `cv2.minAreaRect` angle-convention assumption for this OpenCV build; silently rejected every real skew as "implausible"), caught only once its test was actually run and fixed before being counted as done. Reinforces why untested code must never be marked complete.
 - Layer 3: `GlobalContrastEnhancer` (`app/core/preprocessing/contrast_enhancer.py`, `tests/test_contrast_enhancer.py`, 4/4 passing) - CLAHE, ported from old `preprocess/contrast.py`.
 - Layer 3: `Denoiser` (`app/core/preprocessing/denoiser.py`, `tests/test_denoiser.py`, 4/4 passing) - minimal single-strategy bilateral filter, ported from old `preprocess/denoise.py`'s "gaussian" branch.
-- Layer 6: `PaddleOCREngine` (`app/core/recognition/paddle_ocr_engine.py`, `tests/test_paddle_ocr_engine.py`, 8/8 passing - 7 pure-logic + 1 real-model integration test that actually recognizes rendered Nastaleeq text) - version-fallback constructor, `enable_mkldnn=False` fix, and 2.x/3.x result parsing ported from old `ocr/paddle_engine.py`; reading-order assembly (line grouping + RTL sort) folded in as part of this module rather than split out, per the codebase-minimization directive.
+- Layer 6: `RecognizedWord`/`assign_reading_order` (`app/core/recognition/recognized_word.py`, `tests/test_recognized_word.py`, 2/2 passing) - engine-agnostic recognition-output type and RTL line-grouping/sort logic, used by `GoogleVisionEngine` and `TextExporter`. Split out of the now-deleted `paddle_ocr_engine.py` on 2026-07-26 when `PaddleOCREngine` was removed, since this part of that module wasn't Paddle-specific.
+- Layer 6: `GoogleVisionEngine` (`app/core/recognition/google_vision_engine.py`, `tests/test_google_vision_engine.py`, 6/6 passing) - see the dedicated entry above; the sole recognition engine as of 2026-07-26.
 
-- Layer 10: `TextExporter` (`app/core/export/text_exporter.py`, `tests/test_text_exporter.py`, 9/9 passing) - includes mechanical line assembly (Layer 9 is out of scope for the minimal pipeline; words already arrive ordered from `PaddleOCREngine`).
+- Layer 10: `TextExporter` (`app/core/export/text_exporter.py`, `tests/test_text_exporter.py`, 9/9 passing) - includes mechanical line assembly (Layer 9 is out of scope for the minimal pipeline; words already arrive ordered via `assign_reading_order`, called by the recognition engine).
 - Layer 10: `DocxExporter` (`app/core/export/docx_exporter.py`, `tests/test_docx_exporter.py`, 5/5 passing) - added on explicit user request; RTL paragraph/run formatting ported from the old `app/core/exporters/docx_exporter.py`. Wired into `app/simple_gui.py` behind a checkbox (on by default), writing alongside the `.txt` output, not replacing it. JSON/searchable-PDF exporters remain out of scope.
 - Evaluation: `GroundTruthLoader` (`app/core/evaluation/ground_truth_loader.py`, 3/3 passing)
 - Evaluation: `CERCalculator` (`app/core/evaluation/cer_calculator.py`, 8/8 passing)
 - Evaluation: `WERCalculator` (`app/core/evaluation/wer_calculator.py`, 9/9 passing) - shares the Levenshtein implementation with `CERCalculator` via `app/core/evaluation/_edit_distance.py` rather than duplicating it
 - Evaluation: `ConfidenceAggregator` (`app/core/evaluation/confidence_aggregator.py`, 4/4 passing)
 - Evaluation: `BenchmarkReporter` (`app/core/evaluation/benchmark_reporter.py`, 4/4 passing)
-- Layer 5: `LineSegmenter` (`app/core/structure/line_segmenter.py`, `tests/test_line_segmenter.py`, 7/7 passing) - ported from old `app/core/segmentation.py`; needed because the WER=1.0 PaddleOCR baseline (see below) prompted evaluating line-recognition engines (UTRNet, Qaari) that expect one pre-cropped line per call, not a full page
 
-- `minimal_pipeline.run_minimal_pipeline` (`app/core/minimal_pipeline.py`) - the thin orchestrator (Q9 item 13), wiring the full chain end to end.
 - Benchmark fixture: `tests/fixtures/benchmark_page.pdf` + `benchmark_ground_truth.txt` (`tools/make_benchmark_fixture.py`, reuses `make_synthetic_test_pdf.py`'s font/degradation logic).
-- `tools/run_benchmark.py` - runs the pipeline against the fixture and prints/writes the CER/WER/confidence/timing report.
-- `tools/run_benchmark_qaari.py`, `tools/run_benchmark_google_vision.py` - equivalent one-off comparison scripts for the other two measured engines.
+- `tools/run_benchmark_google_vision.py` - runs `GoogleVisionEngine` against the fixture and prints/writes the CER/WER/confidence/timing report. (`tools/run_benchmark.py` and `tools/run_benchmark_qaari.py`, the equivalent scripts for Paddle/Qaari, were removed with those engines on 2026-07-26.)
 
-Full suite: 101 tests total (97 fast + 1 PaddleOCR real-model test + 1 minimal-pipeline
-real-model test + 1 Qaari real-model test + 1 Google Vision real-API test gated
-behind `GOOGLE_VISION_CREDENTIALS_PATH`), all passing.
+Removed on 2026-07-26 along with `PaddleOCREngine`/`QaariVLMEngine`/`UTRNetEngine`
+(see Layer 5/6 notes above): `app/core/minimal_pipeline.py` (the Paddle-based
+thin orchestrator), `app/core/structure/line_segmenter.py` (Layer 5
+`LineSegmenter`, Qaari's sole consumer), `app/core/paths.py`.
+
+Full suite: 89 tests total (88 fast, all passing + 1 Google Vision real-API
+test gated behind `GOOGLE_VISION_CREDENTIALS_PATH`, correctly skipped without
+it). Down from 101 before the Paddle/Qaari/UTRNet removal - fewer tests, not
+weaker coverage: the removed tests covered code that no longer exists, and
+the two still-relevant ones (`assign_reading_order` reading-order logic)
+were ported to `tests/test_recognized_word.py` rather than lost.
 
 ### Engine comparison (final, against `benchmark_page.pdf#0`)
 
@@ -452,13 +496,30 @@ behind `GOOGLE_VISION_CREDENTIALS_PATH`), all passing.
 fix; see the measurement history in the `GoogleVisionEngine` entry above for
 the before/after.)
 
-**Current recommendation:** `GoogleVisionEngine` is the only engine so far that
-actually solves the stated problem, at the cost of the offline-privacy trade-off
-explicitly accepted in Section 2. Neither local option (PaddleOCR, Qaari) is
-usable as-is. `UTRNetEngine` remains an unexplored offline alternative if the
-cloud trade-off ever needs revisiting (see its deprioritization note above) -
-its CTC-based architecture would very plausibly meet the speed bar, unlike
-Qaari's, but this has not been tested.
+**Current recommendation, and current architecture (2026-07-26):**
+`GoogleVisionEngine` is the only engine so far that actually solves the
+stated problem, at the cost of the offline-privacy trade-off explicitly
+accepted in Section 2. Neither local option tried (PaddleOCR, Qaari) was
+usable as-is, and both have since been removed from the codebase per the
+user's decision to standardize on `GoogleVisionEngine` as the sole engine
+rather than keep disqualified/unused engines around - see the removal notes
+under each engine above. `UTRNetEngine` was never built and is no longer a
+live candidate for the same reason. This is a deliberate departure from
+Section 5's original "no single primary engine, ensemble by default"
+principle - accepted by the user for now given `GoogleVisionEngine` alone
+already solves the accuracy problem this project exists to solve; Layer 7
+(Fusion) and Layer 8 (Variant Search) remain unbuilt as a result. Revisit
+only if accuracy or cost/speed needs change.
+
+**Historical record below (2026-07-26): the Paddle-based minimal pipeline
+described in this subsection has since been removed from the codebase**
+(`app/core/minimal_pipeline.py`, `tools/run_benchmark.py` - see the Layer 6
+`PaddleOCREngine` removal note above). Kept here because it documents *why*
+each decision (fixed DPI, the codebase-minimization scope cut, the two real
+bugs below) was made - the reasoning remains valid project history even
+though `GoogleVisionEngine` now uses its own simpler path
+(`app/simple_gui.py`, `tools/run_benchmark_google_vision.py`) instead of
+this orchestrator.
 
 **The minimal pipeline is complete, wired end-to-end, and has produced its
 first real benchmark report.** Two real bugs were found only by actually
@@ -544,7 +605,7 @@ Real books convert badly even with `GoogleVisionEngine` working correctly at
 the per-word level: `a hadi Devta - UrduReadings.com - Part (01).pdf` (real
 user PDF, 193 pages) scans two physical book pages side by side into a single
 PDF page. `assign_reading_order`'s Y-coordinate line clustering (in
-`paddle_ocr_engine.py`, shared by `GoogleVisionEngine`) has no notion of the
+`app/core/recognition/recognized_word.py`, used by `GoogleVisionEngine`) has no notion of the
 physical page boundary, so it merged same-height lines from both pages into
 one scrambled line - confirmed visually against the real page (page index 5,
 containing pages 10 and 11 of the book).
@@ -722,7 +783,9 @@ framing in the file's own docstring): JSON export, searchable-PDF export,
 job queues beyond simple sequential folder processing, any preprocessing
 (deskew/denoise/CLAHE - measured to hurt Google Vision's accuracy, see the
 `GoogleVisionEngine` entry), and any local/offline engine as the default
-(PaddleOCR and Qaari both disqualified - see the engine comparison table).
+(PaddleOCR and Qaari both disqualified, then removed from the codebase
+entirely on 2026-07-26 - see the engine comparison table and Layer 6 removal
+notes above).
 
 **DOCX visual fidelity - checked, no issues found (2026-07-25):** never
 previously verified beyond the exporter's own unit tests (which only check
