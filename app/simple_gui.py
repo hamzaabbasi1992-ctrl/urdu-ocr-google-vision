@@ -85,7 +85,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.export.docx_exporter import DocxExporter
-from app.core.export.text_exporter import TextExporter, assemble_text
+from app.core.export.text_exporter import TextExporter, assemble_text_with_headings
 from app.core.ingestion.pdf_loader import PDFLoader
 from app.core.ingestion.page_rasterizer import PageRasterizer
 from app.core.recognition.google_vision_engine import GoogleVisionEngine
@@ -345,7 +345,7 @@ class OCRWorker(QThread):
             return ""
         words = _recognize_with_retry(engine, image)
         self.api_call_made.emit()
-        return assemble_text(words)
+        return assemble_text_with_headings(words)
 
 
 class UsageCheckWorker(QThread):

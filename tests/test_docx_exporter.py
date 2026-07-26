@@ -8,6 +8,7 @@ from pathlib import Path
 from docx import Document
 
 from app.core.export.docx_exporter import DocxExporter
+from app.core.export.text_exporter import HEADING_MARKER
 
 
 def test_export_creates_readable_docx_with_correct_paragraph_text(tmp_path: Path) -> None:
@@ -56,3 +57,24 @@ def test_export_empty_text_produces_valid_empty_document(tmp_path: Path) -> None
     assert path.exists()
     document = Document(str(path))
     assert all(not p.text.strip() for p in document.paragraphs)
+
+
+def test_export_applies_heading_1_style_to_marked_lines(tmp_path: Path) -> None:
+    path = tmp_path / "output.docx"
+    DocxExporter().export(f"{HEADING_MARKER}Chapter One\nbody text", path)
+
+    document = Document(str(path))
+    paragraphs = [p for p in document.paragraphs if p.text.strip()]
+    assert paragraphs[0].text == "Chapter One"
+    assert paragraphs[0].style.name == "Heading 1"
+    assert paragraphs[1].text == "body text"
+    assert paragraphs[1].style.name != "Heading 1"
+
+
+def test_export_heading_marker_never_appears_in_visible_text(tmp_path: Path) -> None:
+    path = tmp_path / "output.docx"
+    DocxExporter().export(f"{HEADING_MARKER}Title\n{HEADING_MARKER}Another Title", path)
+
+    document = Document(str(path))
+    for paragraph in document.paragraphs:
+        assert HEADING_MARKER not in paragraph.text

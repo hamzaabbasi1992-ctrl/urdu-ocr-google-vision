@@ -361,6 +361,7 @@ Mechanical only — this is the "never rewrite" boundary made concrete in code.
 | `DocxExporter` | `output.docx` only. |
 | `SearchablePDFExporter` | Searchable PDF only. |
 | `JSONExporter` | Structured JSON (page, word, bbox, confidence) only. |
+| `HeadingClassifier` | Given lines already grouped by `line_index`, decide which are headings from relative line height only. Classification only - never inspects/alters the recognized text, and does not itself touch export formatting (see the dedicated note below). |
 
 ### Layer 11 — Orchestration
 Coordination only — zero content/business logic.
@@ -479,10 +480,14 @@ thin orchestrator), `app/core/structure/line_segmenter.py` (Layer 5
 
 Full suite: 89 tests total (88 fast, all passing + 1 Google Vision real-API
 test gated behind `GOOGLE_VISION_CREDENTIALS_PATH`, correctly skipped without
-it). Down from 101 before the Paddle/Qaari/UTRNet removal - fewer tests, not
-weaker coverage: the removed tests covered code that no longer exists, and
-the two still-relevant ones (`assign_reading_order` reading-order logic)
-were ported to `tests/test_recognized_word.py` rather than lost.
+it), as of the Paddle/Qaari/UTRNet removal. Down from 101 before that
+removal - fewer tests, not weaker coverage: the removed tests covered code
+that no longer exists, and the two still-relevant ones
+(`assign_reading_order` reading-order logic) were ported to
+`tests/test_recognized_word.py` rather than lost. Grew to 101 tests total
+(100 fast + the same 1 gated test) after the heading-detection feature
+below added `tests/test_heading_classifier.py` and new cases in
+`tests/test_text_exporter.py`/`tests/test_docx_exporter.py`.
 
 ### Engine comparison (final, against `benchmark_page.pdf#0`)
 
@@ -800,6 +805,62 @@ into the output too, as it should (it's genuinely on the page) - shows up
 as recurring clutter. Not stripped, since that would mean guessing what's
 "real" content vs. not; flagged here as an optional future filter if it
 becomes a real annoyance, not treated as a defect.
+
+### Heading detection for Word's automatic Table of Contents (2026-07-26)
+
+Motivated by the user wanting converted books navigable in Word via
+Insert > Table of Contents, for all future conversions automatically (not a
+one-off retrofit of already-converted books). Word's automatic ToC feature
+scans for paragraphs carrying a Heading style (Heading 1, etc.) - bold or
+larger text alone is invisible to it, so this had to produce real heading
+styles, not just visual emphasis.
+
+**Detection basis (explicit user sign-off):** the only automatic signal
+available from `GoogleVisionEngine`'s output is each word's bounding-box
+height, so a line is classified as a heading when its median word height is
+at least `HEADING_HEIGHT_RATIO` (1.5x, `app/core/export/heading_classifier.py`)
+times the page/region's own median line height. This is a formatting
+decision made after the fact, about already-final recognized text - it
+never inspects, alters, or guesses at the text itself, so it does not
+conflict with Section 2 rule 2. Per Section 4, it also doesn't require the
+CER/WER proof checklist: it has no effect on recognition accuracy at all,
+only on how an already-correct line is styled in `output.docx`.
+
+**Mechanism:** `assemble_text_with_headings` (`app/core/export/text_exporter.py`)
+groups words into lines exactly like the existing `assemble_text` (both now
+share `_group_lines`/`_join_line` helpers - `assemble_text` itself is
+unchanged and still used by `tools/run_benchmark_google_vision.py`, where a
+heading marker would corrupt CER/WER against ground truth), runs
+`classify_headings`, and prefixes each heading line with `HEADING_MARKER`
+(a `` Private Use Area character - never produced by real OCR text).
+This lets the marker ride transparently through `app/simple_gui.py`'s
+existing plain-text page accumulation and checkpoint/resume machinery
+unchanged - no changes were needed to the checkpoint format or resume
+logic, since the marker is just an ordinary character in the string being
+accumulated. `TextExporter` strips it before writing `output.txt` (Section 2
+rule 5: the text output must contain only the OCR result, no formatting
+artifacts); `DocxExporter` strips it and applies python-docx's "Heading 1"
+style instead of a body paragraph (still right-aligned/RTL/Urdu-tagged like
+body paragraphs, just bold and larger).
+
+Wired into `app/simple_gui.py`'s `_recognize_one_region` (single call site,
+replacing `assemble_text` with `assemble_text_with_headings`), so every
+future conversion gets this automatically, per the user's request - no GUI
+checkbox was added since there is no reason to disable it.
+
+**Not yet validated against a real book.** All of the above is covered by
+unit tests (`tests/test_heading_classifier.py`,
+`tests/test_text_exporter.py`, `tests/test_docx_exporter.py`) with
+synthetic bounding-box heights, but the `1.5x` threshold is a starting
+heuristic, not a measured one - nobody has yet checked it against a real
+scanned book's actual chapter-title-vs-body-text height ratio (both
+previously-converted real books predate this feature). Re-run a real
+conversion and visually check the `.docx` output's headings before trusting
+this on a large/costly batch; the ratio is a single named constant
+(`HEADING_HEIGHT_RATIO`) if it needs tuning. Only a single heading level
+("Heading 1") is applied - no attempt yet to distinguish chapter titles
+from subsection headers via multiple thresholds, since that wasn't asked
+for.
 
 **Open items:**
 1. Google Document AI comparison test - explicitly deferred by the user pending "make current setup better" work; revisit when there's time to spend on it.

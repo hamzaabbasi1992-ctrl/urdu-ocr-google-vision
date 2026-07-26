@@ -6,12 +6,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.core.export.text_exporter import TextExporter, assemble_text
+from app.core.export.text_exporter import (
+    HEADING_MARKER,
+    TextExporter,
+    assemble_text,
+    assemble_text_with_headings,
+)
 from app.core.recognition.recognized_word import RecognizedWord
 
 
 def _word(text: str, line_index: int) -> RecognizedWord:
     return RecognizedWord(text=text, confidence=1.0, x0=0, y0=0, x1=1, y1=1, line_index=line_index)
+
+
+def _word_h(text: str, line_index: int, height: float) -> RecognizedWord:
+    return RecognizedWord(text=text, confidence=1.0, x0=0, y0=0, x1=1, y1=height, line_index=line_index)
 
 
 def test_assemble_text_joins_words_within_a_line_with_space() -> None:
@@ -65,3 +74,32 @@ def test_export_creates_parent_directories(tmp_path: Path) -> None:
     path = tmp_path / "nested" / "dir" / "output.txt"
     TextExporter().export("text", path)
     assert path.exists()
+
+
+def test_assemble_text_with_headings_marks_a_much_taller_line_among_body_lines() -> None:
+    words = [
+        _word_h("Title", 0, 30),
+        _word_h("one", 1, 10),
+        _word_h("two", 2, 10),
+        _word_h("three", 3, 10),
+    ]
+    lines = assemble_text_with_headings(words).split("\n")
+    assert lines[0] == HEADING_MARKER + "Title"
+    assert lines[1:] == ["one", "two", "three"]
+
+
+def test_assemble_text_with_headings_no_marker_when_all_lines_uniform_height() -> None:
+    words = [_word_h("a", 0, 10), _word_h("b", 1, 10), _word_h("c", 2, 10)]
+    result = assemble_text_with_headings(words)
+    assert HEADING_MARKER not in result
+    assert result == "a\nb\nc"
+
+
+def test_assemble_text_with_headings_empty_list_returns_empty_string() -> None:
+    assert assemble_text_with_headings([]) == ""
+
+
+def test_export_strips_heading_marker_before_writing(tmp_path: Path) -> None:
+    path = tmp_path / "output.txt"
+    TextExporter().export(f"{HEADING_MARKER}Title\nbody", path)
+    assert path.read_text(encoding="utf-8-sig") == "Title\nbody"
