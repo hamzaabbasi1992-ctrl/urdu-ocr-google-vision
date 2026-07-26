@@ -361,7 +361,7 @@ Mechanical only — this is the "never rewrite" boundary made concrete in code.
 | `DocxExporter` | `output.docx` only. |
 | `SearchablePDFExporter` | Searchable PDF only. |
 | `JSONExporter` | Structured JSON (page, word, bbox, confidence) only. |
-| `HeadingClassifier` | Given lines already grouped by `line_index`, decide which are headings from relative line height only. Classification only - never inspects/alters the recognized text, and does not itself touch export formatting (see the dedicated note below). |
+| `HeadingClassifier` | Given lines already grouped by `line_index`, decide which are headings from relative line height and/or isolation (extra vertical whitespace above the line) - see the dedicated note below for why (Google Vision exposes neither font weight nor any other direct style signal). Classification only - never inspects/alters the recognized text, and does not itself touch export formatting. |
 
 ### Layer 11 — Orchestration
 Coordination only — zero content/business logic.
@@ -862,6 +862,31 @@ this on a large/costly batch; the ratio is a single named constant
 from subsection headers via multiple thresholds, since that wasn't asked
 for.
 
+**Addendum, same day: added an isolation signal alongside height.** The
+user described their books' actual headings as bold and on their own
+separate line - not necessarily taller than body text. Checked directly
+against the `google-cloud-vision` client's protobuf schema
+(`Word`/`Paragraph`/`Block`/`Symbol`/`TextProperty` fields) before building
+anything further: Google Vision's `DOCUMENT_TEXT_DETECTION` response does
+**not** expose font weight/style anywhere - only `bounding_box`,
+`confidence`, and language/line-break info exist. "Bold" cannot be read
+from the API at all; true bold detection would require cropping each
+line's region from the actual page image and measuring stroke
+thickness/ink density directly, a separate, heavier feature not built
+(rejected for now, per explicit user choice among three options presented).
+
+Instead, `classify_headings` now checks two independent signals, either
+sufficient to mark a line as a heading: the existing relative-height check,
+plus a new isolation check - a line is also a heading if the vertical gap
+above it is at least `HEADING_GAP_RATIO` (2.0x, also unmeasured/starting
+value) times the page/region's typical line-to-line gap, which is exactly
+what "on its own separate line" (i.e. blank-line-separated from
+surrounding paragraph text) looks like geometrically. The very first line
+of a page/region has no previous line to measure a gap against, so it can
+only be classified via height, never isolation (a conservative default,
+not a guess). Both signals remain pure functions of bounding-box geometry
+only - neither inspects the recognized text.
+
 **Open items:**
 1. Google Document AI comparison test - explicitly deferred by the user pending "make current setup better" work; revisit when there's time to spend on it.
-2. Heading-detection calibration across different books - the 1.5x relative-line-height threshold (`HEADING_HEIGHT_RATIO`, see the dedicated section above) was tuned by reasoning, not measurement, and different books/scans plausibly format headings differently (some may not be meaningfully taller than body text at all - e.g. bold-only or centered-only headings, which this heuristic cannot detect). Explicit user acknowledgment (2026-07-26): expect this needs revisiting per-book as real conversions are checked, not treated as solved. If height-only proves insufficient, other signals from Google Vision's output are available to add (e.g. a line being centered rather than filling the line width, larger surrounding vertical whitespace) - not yet explored since no real failure case has been observed yet to justify which one.
+2. Heading-detection calibration across different books - `HEADING_HEIGHT_RATIO` (1.5x) and `HEADING_GAP_RATIO` (2.0x, see the dedicated section above) were both tuned by reasoning, not measurement, and different books/scans plausibly format headings differently. Explicit user acknowledgment (2026-07-26): expect this needs revisiting per-book as real conversions are checked, not treated as solved. If height+isolation still proves insufficient on some book, a line being centered rather than filling the line width is another geometric signal available from Google Vision's bounding boxes and not yet used - or, as a heavier last resort, true bold detection via cropping each line from the actual page image and measuring stroke thickness/ink density (considered and explicitly declined for now - see the dedicated section above).
