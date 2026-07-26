@@ -19,8 +19,8 @@ def _word(text: str, line_index: int) -> RecognizedWord:
     return RecognizedWord(text=text, confidence=1.0, x0=0, y0=0, x1=1, y1=1, line_index=line_index)
 
 
-def _word_h(text: str, line_index: int, height: float) -> RecognizedWord:
-    return RecognizedWord(text=text, confidence=1.0, x0=0, y0=0, x1=1, y1=height, line_index=line_index)
+def _word_h(text: str, line_index: int, height: float, width: float = 100.0) -> RecognizedWord:
+    return RecognizedWord(text=text, confidence=1.0, x0=0, y0=0, x1=width, y1=height, line_index=line_index)
 
 
 def test_assemble_text_joins_words_within_a_line_with_space() -> None:
@@ -78,10 +78,10 @@ def test_export_creates_parent_directories(tmp_path: Path) -> None:
 
 def test_assemble_text_with_headings_marks_a_much_taller_line_among_body_lines() -> None:
     words = [
-        _word_h("Title", 0, 30),
-        _word_h("one", 1, 10),
-        _word_h("two", 2, 10),
-        _word_h("three", 3, 10),
+        _word_h("Title", 0, 30, width=20),
+        _word_h("one", 1, 10, width=100),
+        _word_h("two", 2, 10, width=100),
+        _word_h("three", 3, 10, width=100),
     ]
     lines = assemble_text_with_headings(words).split("\n")
     assert lines[0] == HEADING_MARKER + "Title"

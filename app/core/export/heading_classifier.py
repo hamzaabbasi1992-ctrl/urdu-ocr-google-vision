@@ -5,15 +5,26 @@ reading-order lines, decide which lines are headings. Never inspects or
 judges the recognized text itself - this is a formatting decision about
 already-final, already-correct text, not a guess about what the text says
 (PROJECT_SPEC.md Section 2 rule 2 governs the words, not how a line like
-this gets styled in Word).
+this gets styled in Word). Every signal below is purely geometric
+(bounding-box position/size), never the text content.
 
-Two independent signals, either one sufficient to classify a line as a
-heading:
+A line is classified as a heading only if it is short (its horizontal span
+is well under a full body-text line's width) AND at least one of two
+independent signals holds:
 1. Relative height - the line's text is noticeably taller than typical body
    text.
 2. Isolation - the line has noticeably more vertical whitespace above it
-   than typical line-to-line spacing (a blank-line-separated heading, even
-   one that isn't itself taller than body text).
+   than typical line-to-line spacing.
+
+The shortness requirement was added after a real-book test
+(PROJECT_SPEC.md, 2026-07-26) found height/isolation alone produced a 9.3%
+false-positive rate - mostly footnote/citation lines and ordinary
+mid-paragraph sentence fragments, which can be tall or isolated (footnotes
+are visually set apart; a recurring page-navigation artifact created
+artificial gaps before ordinary body lines) but are never short the way a
+real title is. Without also requiring shortness, height/isolation alone
+cannot tell "a genuine heading" apart from "any line that happens to sit
+next to unusual whitespace or size."
 
 Google Vision's DOCUMENT_TEXT_DETECTION response does not expose font
 weight/style (checked directly against the google-cloud-vision client's
@@ -40,8 +51,17 @@ HEADING_HEIGHT_RATIO = 1.5
 # than body text (e.g. bold-only headings, which height alone can't see).
 HEADING_GAP_RATIO = 2.0
 
-# Neither ratio above is measured against a real book yet - both are
-# starting heuristics pending real-world validation (see PROJECT_SPEC.md).
+# A line can only ever be a heading if its horizontal span (rightmost x1
+# minus leftmost x0 across its words) is no more than this fraction of the
+# region's own median line width. Required, not optional - see the module
+# docstring for why this was added. 0.6 is a starting value: a normal
+# wrapped body line fills most of the text column width, while a short
+# title clearly does not.
+HEADING_MAX_WIDTH_RATIO = 0.6
+
+# None of the three ratios above are measured against a real book yet -
+# starting heuristics pending further real-world validation (see
+# PROJECT_SPEC.md).
 
 
 def classify_headings(lines: list[list[RecognizedWord]]) -> list[bool]:
@@ -55,11 +75,15 @@ def classify_headings(lines: list[list[RecognizedWord]]) -> list[bool]:
     gaps = _gaps_above(lines)
     gap_baseline = _median_positive(gaps)
 
+    widths = [_line_width(line) for line in lines]
+    width_baseline = _median_positive(widths)
+
     result = []
-    for height, gap in zip(heights, gaps):
+    for height, gap, width in zip(heights, gaps, widths):
+        is_short = width_baseline > 0 and width <= width_baseline * HEADING_MAX_WIDTH_RATIO
         is_tall = height_baseline > 0 and height >= height_baseline * HEADING_HEIGHT_RATIO
         is_isolated = gap_baseline > 0 and gap >= gap_baseline * HEADING_GAP_RATIO
-        result.append(is_tall or is_isolated)
+        result.append(is_short and (is_tall or is_isolated))
     return result
 
 
@@ -78,6 +102,12 @@ def _line_top(line: list[RecognizedWord]) -> float:
 def _line_bottom(line: list[RecognizedWord]) -> float:
     ys = [w.y1 for w in line]
     return max(ys) if ys else 0.0
+
+
+def _line_width(line: list[RecognizedWord]) -> float:
+    if not line:
+        return 0.0
+    return max(w.x1 for w in line) - min(w.x0 for w in line)
 
 
 def _gaps_above(lines: list[list[RecognizedWord]]) -> list[float]:

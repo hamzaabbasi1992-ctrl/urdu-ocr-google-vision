@@ -13,4 +13,5 @@ tools/benchmark_output/
 *-key.json
 credentials/
 Output/
+Output*/
 *.lnk

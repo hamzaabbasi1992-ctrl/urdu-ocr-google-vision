@@ -361,7 +361,7 @@ Mechanical only — this is the "never rewrite" boundary made concrete in code.
 | `DocxExporter` | `output.docx` only. |
 | `SearchablePDFExporter` | Searchable PDF only. |
 | `JSONExporter` | Structured JSON (page, word, bbox, confidence) only. |
-| `HeadingClassifier` | Given lines already grouped by `line_index`, decide which are headings from relative line height and/or isolation (extra vertical whitespace above the line) - see the dedicated note below for why (Google Vision exposes neither font weight nor any other direct style signal). Classification only - never inspects/alters the recognized text, and does not itself touch export formatting. |
+| `HeadingClassifier` | Given lines already grouped by `line_index`, decide which are headings: must be short (narrow horizontal span) AND (taller than typical body text OR isolated by extra vertical whitespace) - see the dedicated note below for why (Google Vision exposes neither font weight nor any other direct style signal, and height/isolation alone proved insufficient on a real book). Classification only - never inspects/alters the recognized text, and does not itself touch export formatting. |
 
 ### Layer 11 — Orchestration
 Coordination only — zero content/business logic.
@@ -887,6 +887,65 @@ only be classified via height, never isolation (a conservative default,
 not a guess). Both signals remain pure functions of bounding-box geometry
 only - neither inspects the recognized text.
 
+**First real-book test (2026-07-26): found a 9.3% false-positive rate,
+root-caused, and fixed with a required shortness check.** The user
+converted a real book (`احیاء العلوم جلد (2)`, 29,533 recognized lines) and
+reported footnotes were getting marked as headings. Measured directly
+against the real `output.docx`:
+
+```
+Total non-empty paragraphs: 29,533
+Classified as Heading 1:     2,746  (9.3%)
+Median length of a flagged "heading": 95 characters
+Flagged lines over 40 characters long: 2,183 (79%)
+Flagged lines whose immediately preceding line was the recurring
+  "Index To Go" page-navigation boilerplate (see the earlier DOCX visual
+  fidelity note): 1,479 (54%)
+```
+
+A real book has dozens to a few hundred headings, not thousands - this
+was a real, serious defect, not a minor mistuning. Root cause: height and
+isolation alone can both be true for lines that are *not* headings -
+footnotes are visually set apart by whitespace (triggers isolation) and
+the recurring "Index To Go" boilerplate creates an artificial large gap
+before whatever line follows it on many pages (also triggers isolation),
+regardless of whether that line is a real heading or just the next
+sentence of body text/a footnote citation. Neither signal alone, nor
+their combination, previously required the candidate line to actually
+*look like a title* - which is the one property distinguishing real
+headings from these false positives (median 95 characters is a sentence
+or citation, not a title).
+
+**Fix:** `classify_headings` now requires a third, independent geometric
+check - a line's horizontal span (rightmost `x1` minus leftmost `x0`
+across its words) must be no more than `HEADING_MAX_WIDTH_RATIO` (0.6x,
+also a starting value) of the region's own median line width. This is
+`AND`-ed with the existing height-or-isolation check (previously the only
+requirement) - a line must now be **short AND (tall OR isolated)**, not
+just tall-or-isolated alone. Deliberately geometric (bounding-box width),
+not a character-count check, to stay consistent with the module's "never
+inspects the text" design. Covered by new test cases in
+`tests/test_heading_classifier.py` (a tall-but-full-width line and an
+isolated-but-full-width line, mirroring the two real false-positive
+shapes found, both now correctly excluded).
+
+**Not yet re-verified against a real book** - doing so requires another
+paid Google Vision conversion, which wasn't run as part of this fix. The
+diagnostic data above supports the fix (77%+ of the false positives were
+long lines the shortness gate would now exclude), but this is reasoning
+from the failure data, not a fresh measurement. Re-check the next real
+conversion's `.docx` before trusting this at scale.
+
+**Also found and fixed while investigating this**: `Output/`
+(the folder holding real converted book text, deliberately gitignored per
+Section 2's privacy rules) had been renamed on disk to
+`Output urdu ocr google vision/` (apparently by Google Drive sync - a
+`.tmp.driveupload` subfolder was present inside it), which no longer
+matched the exact-name `.gitignore` rule and left it **unprotected** - a
+`git add -A` would have staged real private book content. Fixed by adding
+an `Output*/` wildcard pattern to `.gitignore` alongside the exact-match
+one, so a similar future rename doesn't silently reopen this gap.
+
 **Open items:**
 1. Google Document AI comparison test - explicitly deferred by the user pending "make current setup better" work; revisit when there's time to spend on it.
-2. Heading-detection calibration across different books - `HEADING_HEIGHT_RATIO` (1.5x) and `HEADING_GAP_RATIO` (2.0x, see the dedicated section above) were both tuned by reasoning, not measurement, and different books/scans plausibly format headings differently. Explicit user acknowledgment (2026-07-26): expect this needs revisiting per-book as real conversions are checked, not treated as solved. If height+isolation still proves insufficient on some book, a line being centered rather than filling the line width is another geometric signal available from Google Vision's bounding boxes and not yet used - or, as a heavier last resort, true bold detection via cropping each line from the actual page image and measuring stroke thickness/ink density (considered and explicitly declined for now - see the dedicated section above).
+2. Heading-detection calibration across different books - `HEADING_HEIGHT_RATIO` (1.5x), `HEADING_GAP_RATIO` (2.0x), and `HEADING_MAX_WIDTH_RATIO` (0.6x, added after the first real-book test found a 9.3% false-positive rate - see the dedicated section above) are all tuned by reasoning, not full measurement. The first real-book test already validated the shortness gate's *direction* (most false positives were long lines it would exclude) but the fix itself hasn't been re-verified against a fresh conversion yet - do that before trusting this on a large/costly batch. Explicit user acknowledgment (2026-07-26): expect this needs revisiting per-book as real conversions are checked, not treated as solved. If height+isolation+shortness still proves insufficient on some book, a line being centered rather than left/right-aligned with the body-text column is another geometric signal available and not yet used - or, as a heavier last resort, true bold detection via cropping each line from the actual page image and measuring stroke thickness/ink density (considered and explicitly declined for now - see the dedicated section above).
