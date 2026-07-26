@@ -764,6 +764,32 @@ to it there (via "+ Grant access") fixed it immediately. Worth remembering
 for any future "granted the role but still permission denied" case with a
 service account.
 
+### Multi-file input, Pause/Resume relabeling, last-input-dir memory (2026-07-26)
+
+User asked for: picking a whole folder or many files at once for a queue,
+output named after input (already true - confirmed, not changed), explicit
+Pause/Resume buttons, continuing safely after an accidental close/crash
+(already true - confirmed, not changed, see the checkpoint/resume sections
+above), and remembering the last input folder.
+
+**Explicit user choices made before implementing:**
+- Pause/Resume is a relabeling of the existing Stop-then-rerun mechanism
+  (Stop -> Pause, Run OCR -> Resume after a pause/failure), not a new
+  true-suspend-the-worker-thread mechanism - chosen because
+  `GoogleVisionEngine` has no heavy model to keep loaded, so a fresh
+  `OCRWorker`/engine on Resume costs nothing extra, and the existing
+  checkpoint-based recovery already gives correct, tested resume behavior.
+- The 50-page checkpoint interval was kept as-is rather than tightened -
+  already proven in real production use (the 1100-page book), and a crash
+  between checkpoints costs at most re-doing ~49 already-paid-for pages,
+  not real data loss (the source PDF is never at risk).
+
+**What was actually missing** (the rest of the request already existed,
+confirmed by reading the code before touching anything, not assumed):
+picking several individually-chosen PDF files (previously only "one file"
+or "one whole folder"), and remembering the last-browsed input directory
+across runs.
+
 ### GUI (`app/simple_gui.py`) feature roadmap - consolidated
 
 Built and in real use (via the two real books converted so far - "a hadi
@@ -771,15 +797,16 @@ Devta" and "احیاء العلوم جلد (1)"), listed here in one place since
 these shipped incrementally across several sessions without a single
 consolidated summary:
 
-- Single-file or whole-folder PDF input, output folder/filename selection, TXT and optional DOCX output
-- Page-range selection (convert a subset of a book, not just the whole file)
+- Three input modes (single PDF file, whole folder of PDFs, or several individually-picked files - added 2026-07-26), output folder/filename selection, TXT and optional DOCX output - output is always named after each input file's own stem, in all three modes
+- Input picker dialogs remember the last-browsed folder across runs (`last_input_dir` via `QSettings`, added 2026-07-26)
+- Page-range selection (convert a subset of a book, not just the whole file) - single-file mode only; folder/multi-file modes always process each file's full page range, since a per-file page picker isn't practical at that scale
 - Quality (DPI) selector, persisted across runs via `QSettings`
-- Stop button - cooperative, checked between pages, never discards work already recognized (`try`/`finally` export)
+- Pause/Resume buttons (relabeled from Stop/Run OCR, 2026-07-26 - see the dedicated section above) - cooperative, checked between pages, never discards work already recognized (`try`/`finally` export); Resume and the automatic checkpoint-based recovery from a closed/crashed app are the same underlying mechanism, not two different features
 - Blank-page skip (`_is_blank_page`) - zero accuracy cost, saves an API call on chapter-break/blank scan pages
 - Automatic retry (`_recognize_with_retry`) on transient per-page API failures
 - Two-page-spread splitting (opt-in `split_spread` checkbox) - see the dedicated section above
 - Local usage estimate + free-tier/cost warning before a run that would exceed it
-- Checkpoint/resume every 50 pages, plus whole-file skip for already-completed files in a folder batch - see the dedicated sections above
+- Checkpoint/resume every 50 pages (plus always on a clean Pause), and whole-file skip for already-completed files in a folder/multi-file batch - see the dedicated sections above. Verified in real production use on a real 1100-page book (`احیاء العلوم جلد (1)`) with no data loss.
 - Real (Google-confirmed) usage check - see the dedicated section above, confirmed working
 - Live per-page text preview in the GUI during single-file runs
 

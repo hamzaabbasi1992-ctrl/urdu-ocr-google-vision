@@ -1,5 +1,8 @@
-"""Minimal PySide6 GUI for running Google Vision OCR against a PDF or a
-folder of PDFs.
+"""Minimal PySide6 GUI for running Google Vision OCR against a single PDF, a
+whole folder of PDFs, or several individually-picked PDF files (three input
+modes, one radio group). All three feed the same OCRWorker queue and get
+the same per-file behavior below (checkpointing, skip-if-already-done,
+output named after the input file's own stem).
 
 Deliberately small and single-file - this is NOT the old elaborate
 multi-widget GUI (app/gui/), which is tied to the superseded 2-engine
@@ -25,12 +28,16 @@ has sent this calendar month), not synced with Google Cloud's actual
 billing - stated as such in the UI so it isn't mistaken for authoritative
 billing data.
 
-Stopping mid-run: the worker checks a cooperative stop flag between pages
-(not mid-API-call - a single Vision call is a couple of seconds, not worth
-the complexity of interrupting one in flight). Whatever pages were already
+Pause/Resume: the worker checks a cooperative stop flag between pages (not
+mid-API-call - a single Vision call is a couple of seconds, not worth the
+complexity of interrupting one in flight). Whatever pages were already
 recognized for the file in progress are still written out - both on a
-deliberate stop and on an unexpected error - via try/finally, so a network
-hiccup on page 80 of 100 doesn't discard pages 1-79.
+deliberate pause and on an unexpected error - via try/finally, so a network
+hiccup on page 80 of 100 doesn't discard pages 1-79. The "Resume" label
+(swapped in for "Run OCR" after a pause/failure) and the underlying
+checkpoint/resume mechanism (see below) are the same mechanism a plain
+app close/crash recovers through too - Pause is not a special case, just a
+deliberate, immediate version of the same recovery every interruption gets.
 
 Two-page-spread splitting (opt-in checkbox): diagnosed from a real user
 report of "so many mistakes" that turned out to be word-salad, not
@@ -53,6 +60,11 @@ covers that) loses the whole file's progress. Every _CHECKPOINT_INTERVAL_PAGES
 pages, the accumulated text so far is written to the same output path,
 overwriting the previous checkpoint - so a crash at page 733 loses at most
 the last 49 pages, not all 733.
+
+The file/folder picker dialogs (all three input modes) reopen in whatever
+directory was last browsed (persisted via QSettings as "last_input_dir"),
+so picking several files from the same place across multiple runs doesn't
+mean re-navigating from scratch each time.
 """
 
 from __future__ import annotations
@@ -375,6 +387,7 @@ class MainWindow(QWidget):
 
         self._settings = QSettings("UrduOCR", "SimpleGoogleVisionGUI")
         self._input_path: Path | None = None
+        self._input_paths: list[Path] | None = None  # multiple-files mode only
         self._input_page_count: int | None = None
         self._worker: OCRWorker | None = None
 
@@ -387,7 +400,10 @@ class MainWindow(QWidget):
         self.single_file_radio = QRadioButton("Single PDF file")
         self.single_file_radio.setChecked(True)
         self.folder_radio = QRadioButton("Folder of PDFs")
+        self.multi_file_radio = QRadioButton("Multiple files...")
         self.single_file_radio.toggled.connect(self._on_input_mode_changed)
+        self.folder_radio.toggled.connect(self._on_input_mode_changed)
+        self.multi_file_radio.toggled.connect(self._on_input_mode_changed)
 
         self.input_label = QLabel("Nothing selected")
         input_button = QPushButton("Select...")
@@ -396,6 +412,7 @@ class MainWindow(QWidget):
         mode_row = QHBoxLayout()
         mode_row.addWidget(self.single_file_radio)
         mode_row.addWidget(self.folder_radio)
+        mode_row.addWidget(self.multi_file_radio)
         mode_row.addStretch(1)
 
         input_row = QHBoxLayout()
@@ -503,18 +520,23 @@ class MainWindow(QWidget):
         real_usage_row.addWidget(self.check_real_usage_button)
         real_usage_row.addWidget(self.real_usage_label, 1)
 
-        # --- run / stop / progress / output ---
+        # --- run / pause / progress / output ---
         self.run_button = QPushButton("Run OCR")
         self.run_button.clicked.connect(self._run_ocr)
         self.run_button.setEnabled(False)
 
-        self.stop_button = QPushButton("Stop")
-        self.stop_button.clicked.connect(self._stop_ocr)
-        self.stop_button.setEnabled(False)
+        self.pause_button = QPushButton("Pause")
+        self.pause_button.setToolTip(
+            "Stops after the current page finishes and saves everything recognized so far. "
+            "Click Resume (or just Run OCR again with the same input/output) to continue exactly "
+            "where this left off - nothing already recognized is redone or lost."
+        )
+        self.pause_button.clicked.connect(self._pause_ocr)
+        self.pause_button.setEnabled(False)
 
         run_row = QHBoxLayout()
         run_row.addWidget(self.run_button)
-        run_row.addWidget(self.stop_button)
+        run_row.addWidget(self.pause_button)
 
         self.progress_bar = QProgressBar()
         self.status_label = QLabel("")
@@ -599,30 +621,54 @@ class MainWindow(QWidget):
 
     def _on_input_mode_changed(self) -> None:
         self._input_path = None
+        self._input_paths = None
         self._input_page_count = None
         self.input_label.setText("Nothing selected")
-        self.output_name_edit.setEnabled(self.single_file_radio.isChecked())
         is_single = self.single_file_radio.isChecked()
+        self.output_name_edit.setEnabled(is_single)
         self.page_range_label.setEnabled(is_single)
         self.start_page_spin.setEnabled(is_single)
         self.end_page_spin.setEnabled(is_single)
         self.page_count_label.setText("")
+        self._reset_run_button_to_fresh_job()
         self._update_run_enabled()
 
+    def _last_input_dir(self) -> str:
+        return self._settings.value("last_input_dir", "")
+
+    def _remember_input_dir(self, path: Path) -> None:
+        directory = path if path.is_dir() else path.parent
+        self._settings.setValue("last_input_dir", str(directory))
+
     def _select_input(self) -> None:
+        start_dir = self._last_input_dir()
         if self.single_file_radio.isChecked():
-            path_str, _ = QFileDialog.getOpenFileName(self, "Select PDF", "", "PDF files (*.pdf)")
+            path_str, _ = QFileDialog.getOpenFileName(self, "Select PDF", start_dir, "PDF files (*.pdf)")
             if path_str:
                 self._input_path = Path(path_str)
+                self._remember_input_dir(self._input_path)
                 self.input_label.setText(self._input_path.name)
                 self.output_name_edit.setText(self._input_path.stem + ".txt")
                 self._load_page_count()
-        else:
-            path_str = QFileDialog.getExistingDirectory(self, "Select folder of PDFs")
+                self._reset_run_button_to_fresh_job()
+        elif self.folder_radio.isChecked():
+            path_str = QFileDialog.getExistingDirectory(self, "Select folder of PDFs", start_dir)
             if path_str:
                 self._input_path = Path(path_str)
+                self._remember_input_dir(self._input_path)
                 count = len(list(self._input_path.glob("*.pdf")))
                 self.input_label.setText(f"{self._input_path.name} ({count} PDF(s) found)")
+                self._reset_run_button_to_fresh_job()
+        else:
+            path_strs, _ = QFileDialog.getOpenFileNames(self, "Select PDF files", start_dir, "PDF files (*.pdf)")
+            if path_strs:
+                self._input_paths = [Path(p) for p in path_strs]
+                self._remember_input_dir(self._input_paths[0])
+                names = ", ".join(p.name for p in self._input_paths[:3])
+                if len(self._input_paths) > 3:
+                    names += f", +{len(self._input_paths) - 3} more"
+                self.input_label.setText(f"{len(self._input_paths)} file(s) selected: {names}")
+                self._reset_run_button_to_fresh_job()
         self._update_run_enabled()
 
     def _load_page_count(self) -> None:
@@ -659,7 +705,8 @@ class MainWindow(QWidget):
             self.credentials_edit.setText(path_str)
 
     def _update_run_enabled(self) -> None:
-        self.run_button.setEnabled(bool(self._input_path) and bool(self.credentials_edit.text().strip()))
+        has_input = bool(self._input_path) or bool(self._input_paths)
+        self.run_button.setEnabled(has_input and bool(self.credentials_edit.text().strip()))
 
     # ---- cost estimate -----------------------------------------------------
 
@@ -724,11 +771,15 @@ class MainWindow(QWidget):
             page_ranges: list[tuple[int, int] | None] = [
                 (self.start_page_spin.value() - 1, self.end_page_spin.value() - 1)
             ]
-        else:
+        elif self.folder_radio.isChecked():
             pdf_paths = sorted(self._input_path.glob("*.pdf"))
             if not pdf_paths:
                 QMessageBox.warning(self, "No PDFs found", "The selected folder has no .pdf files.")
                 return
+            output_paths = [output_folder / f"{p.stem}.txt" for p in pdf_paths]
+            page_ranges = [None] * len(pdf_paths)  # full range per file - a page picker per file isn't practical
+        else:
+            pdf_paths = self._input_paths
             output_paths = [output_folder / f"{p.stem}.txt" for p in pdf_paths]
             page_ranges = [None] * len(pdf_paths)  # full range per file - a page picker per file isn't practical
 
@@ -744,7 +795,7 @@ class MainWindow(QWidget):
         dpi = _DPI_OPTIONS[self.quality_combo.currentIndex()][1]
 
         self.run_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
+        self.pause_button.setEnabled(True)
         self.text_view.clear()
         self.status_label.setText("Starting...")
 
@@ -764,11 +815,16 @@ class MainWindow(QWidget):
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
 
-    def _stop_ocr(self) -> None:
+    def _pause_ocr(self) -> None:
         if self._worker is not None:
-            self.stop_button.setEnabled(False)
-            self.status_label.setText("Stopping after the current page...")
+            self.pause_button.setEnabled(False)
+            self.status_label.setText("Pausing after the current page...")
             self._worker.request_stop()
+
+    def _reset_run_button_to_fresh_job(self) -> None:
+        """Called whenever the input selection changes - a different job,
+        not a continuation of whatever was previously paused/failed."""
+        self.run_button.setText("Run OCR")
 
     def _on_file_started(self, pdf_name: str, total_pages: int) -> None:
         self.progress_bar.setMaximum(max(1, total_pages))
@@ -797,19 +853,22 @@ class MainWindow(QWidget):
 
     def _on_all_done(self) -> None:
         self.status_label.setText("Done.")
+        self.run_button.setText("Run OCR")
         self.run_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
+        self.pause_button.setEnabled(False)
 
     def _on_stopped(self) -> None:
-        self.status_label.setText("Stopped - pages processed so far were saved.")
+        self.status_label.setText("Paused - pages processed so far were saved. Click Resume to continue.")
+        self.run_button.setText("Resume")
         self.run_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
+        self.pause_button.setEnabled(False)
 
     def _on_failed(self, message: str) -> None:
         QMessageBox.critical(self, "OCR failed", f"{message}\n\nAny pages already recognized were still saved.")
-        self.status_label.setText("Failed - pages processed before the error were saved.")
+        self.status_label.setText("Failed - pages processed before the error were saved. Click Resume to continue.")
+        self.run_button.setText("Resume")
         self.run_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
+        self.pause_button.setEnabled(False)
 
 
 def main() -> None:
