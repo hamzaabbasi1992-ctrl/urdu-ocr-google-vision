@@ -15,9 +15,11 @@ accuracy worse, not better (Section 6, GoogleVisionEngine entry). Google's
 own document-OCR pipeline is already tuned; our extra smoothing loses fine
 detail like diacritic dots.
 
-Output is TXT plus an optional DOCX (checkbox, on by default) - JSON and
-searchable-PDF exporters were not ported to the new architecture and remain
-out of scope (explicit choice, not an oversight).
+Output is TXT plus an optional DOCX (checkbox, on by default) and an
+optional searchable PDF (checkbox, off by default - see SearchablePDFExporter,
+app/core/export/searchable_pdf_exporter.py). JSON export was not ported to
+the new architecture and remains out of scope (explicit choice, not an
+oversight).
 
 GoogleVisionEngine is a cloud engine (PROJECT_SPEC.md Section 2, explicit
 user sign-off) - the window title and a persistent red label say so, so
@@ -97,10 +99,12 @@ from PySide6.QtWidgets import (
 )
 
 from app.core.export.docx_exporter import DocxExporter
+from app.core.export.searchable_pdf_exporter import SearchablePDFExporter
 from app.core.export.text_exporter import TextExporter, assemble_text_with_headings
 from app.core.ingestion.pdf_loader import PDFLoader
 from app.core.ingestion.page_rasterizer import PageRasterizer
 from app.core.recognition.google_vision_engine import GoogleVisionEngine
+from app.core.recognition.recognized_word import RecognizedWord
 from app.core.usage_monitor import get_vision_api_request_count_this_month
 
 _DPI_OPTIONS = [
@@ -212,6 +216,7 @@ class OCRWorker(QThread):
         dpi: int,
         page_ranges: list[tuple[int, int] | None],
         write_docx: bool = False,
+        write_searchable_pdf: bool = False,
         split_spread: bool = False,
     ) -> None:
         """page_ranges: one (start_index, end_index) 0-based inclusive pair
@@ -233,6 +238,7 @@ class OCRWorker(QThread):
         self._dpi = dpi
         self._page_ranges = page_ranges
         self._write_docx = write_docx
+        self._write_searchable_pdf = write_searchable_pdf
         self._split_spread = split_spread
         self._stop_event = threading.Event()
 
@@ -272,6 +278,11 @@ class OCRWorker(QThread):
         last_completed_index: int | None = None
         stopped_here = False
         completed_normally = False
+        pdf_exporter = (
+            SearchablePDFExporter(existing_path=output_path.with_suffix(".pdf"))
+            if self._write_searchable_pdf
+            else None
+        )
         try:
             with PDFLoader(pdf_path) as loader:
                 if page_range is None:
@@ -308,14 +319,16 @@ class OCRWorker(QThread):
                     page = loader.get_page(index)
                     image = rasterizer.rasterize(page, dpi=self._dpi).image
 
-                    text = self._recognize_page_image(engine, image)
+                    text, words = self._recognize_page_image(engine, image)
                     if text.strip():
                         page_texts.append(text)
+                    if pdf_exporter is not None:
+                        pdf_exporter.add_page(image, words, dpi=self._dpi)
                     self.page_recognized.emit(page_number, total_in_run, text or "(blank page - skipped)")
                     last_completed_index = index
 
                     if page_texts and page_number % _CHECKPOINT_INTERVAL_PAGES == 0:
-                        self._export_current(page_texts, output_path, resume_prefix)
+                        self._export_current(page_texts, output_path, resume_prefix, pdf_exporter)
                         _save_checkpoint(output_path, last_completed_index, self._dpi, self._split_spread)
                 else:
                     # for-else: only runs if the loop finished without break -
@@ -325,39 +338,60 @@ class OCRWorker(QThread):
             return stopped_here
         finally:
             if page_texts or resume_prefix:
-                self._export_current(page_texts, output_path, resume_prefix)
+                self._export_current(page_texts, output_path, resume_prefix, pdf_exporter)
                 if completed_normally:
                     _clear_checkpoint(output_path)
                 elif last_completed_index is not None:
                     _save_checkpoint(output_path, last_completed_index, self._dpi, self._split_spread)
                 self.file_done.emit(pdf_path.name, str(output_path))
+            if pdf_exporter is not None:
+                pdf_exporter.close()
 
-    def _export_current(self, page_texts: list[str], output_path: Path, resume_prefix: str = "") -> None:
+    def _export_current(
+        self,
+        page_texts: list[str],
+        output_path: Path,
+        resume_prefix: str = "",
+        pdf_exporter: SearchablePDFExporter | None = None,
+    ) -> None:
         new_text = "\n\n".join(page_texts)
         text = f"{resume_prefix}\n\n{new_text}" if resume_prefix and new_text else (resume_prefix or new_text)
         TextExporter().export(text, output_path)
         if self._write_docx:
             DocxExporter().export(text, output_path.with_suffix(".docx"))
+        if pdf_exporter is not None:
+            pdf_exporter.save(output_path.with_suffix(".pdf"))
 
-    def _recognize_page_image(self, engine, image) -> str:
+    def _recognize_page_image(self, engine, image) -> tuple[str, list[RecognizedWord]]:
         """Recognizes one rasterized page image, honoring split_spread.
-        Returns "" for a fully blank page/pair of halves - never invents
-        text for a region with nothing on it."""
+        Returns ("", []) for a fully blank page/pair of halves - never
+        invents text for a region with nothing on it. Words are always
+        returned in the coordinate space of the full `image` passed in, even
+        when split_spread recognizes each half separately - the left half's
+        words are shifted right by the split offset, so both text assembly
+        and SearchablePDFExporter's word placement stay correct without
+        either needing to know split_spread happened."""
         if not self._split_spread:
             return self._recognize_one_region(engine, image)
 
         width = image.shape[1]
-        right_half = image[:, width // 2 :]  # read first - correct order for an RTL book spread
-        left_half = image[:, : width // 2]
-        parts = [self._recognize_one_region(engine, half) for half in (right_half, left_half)]
-        return "\n\n".join(p for p in parts if p.strip())
+        offset = width // 2
+        right_half = image[:, offset:]  # read first - correct order for an RTL book spread
+        left_half = image[:, :offset]
+        right_text, right_words = self._recognize_one_region(engine, right_half)
+        left_text, left_words = self._recognize_one_region(engine, left_half)
+        for word in left_words:
+            word.x0 += offset
+            word.x1 += offset
+        text = "\n\n".join(p for p in (right_text, left_text) if p.strip())
+        return text, right_words + left_words
 
-    def _recognize_one_region(self, engine, image) -> str:
+    def _recognize_one_region(self, engine, image) -> tuple[str, list[RecognizedWord]]:
         if _is_blank_page(image):
-            return ""
+            return "", []
         words = _recognize_with_retry(engine, image)
         self.api_call_made.emit()
-        return assemble_text_with_headings(words)
+        return assemble_text_with_headings(words), words
 
 
 class UsageCheckWorker(QThread):
@@ -474,6 +508,14 @@ class MainWindow(QWidget):
             lambda checked: self._settings.setValue("write_docx", int(checked))
         )
 
+        self.write_searchable_pdf_checkbox = QCheckBox(
+            "Also save as searchable PDF (looks like the original scan, but text is selectable/searchable)"
+        )
+        self.write_searchable_pdf_checkbox.setChecked(bool(int(self._settings.value("write_searchable_pdf", 0))))
+        self.write_searchable_pdf_checkbox.toggled.connect(
+            lambda checked: self._settings.setValue("write_searchable_pdf", int(checked))
+        )
+
         # --- quality + credentials ---
         self.quality_combo = QComboBox()
         for label, _dpi in _DPI_OPTIONS:
@@ -554,6 +596,7 @@ class MainWindow(QWidget):
         layout.addLayout(output_folder_row)
         layout.addLayout(output_name_row)
         layout.addWidget(self.write_docx_checkbox)
+        layout.addWidget(self.write_searchable_pdf_checkbox)
         layout.addLayout(quality_row)
         layout.addLayout(cred_row)
         layout.addWidget(self.usage_label)
@@ -802,6 +845,7 @@ class MainWindow(QWidget):
         self._worker = OCRWorker(
             pdf_paths, output_paths, credentials_path, dpi, page_ranges,
             write_docx=self.write_docx_checkbox.isChecked(),
+            write_searchable_pdf=self.write_searchable_pdf_checkbox.isChecked(),
             split_spread=self.split_spread_checkbox.isChecked(),
         )
         self._worker.file_started.connect(self._on_file_started)
