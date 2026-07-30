@@ -462,10 +462,10 @@ identity is not yet configured for this repo):
 - Layer 6: `RecognizedWord`/`assign_reading_order` (`app/core/recognition/recognized_word.py`, `tests/test_recognized_word.py`, 2/2 passing) - engine-agnostic recognition-output type and RTL line-grouping/sort logic, used by `GoogleVisionEngine` and `TextExporter`. Split out of the now-deleted `paddle_ocr_engine.py` on 2026-07-26 when `PaddleOCREngine` was removed, since this part of that module wasn't Paddle-specific.
 - Layer 6: `GoogleVisionEngine` (`app/core/recognition/google_vision_engine.py`, `tests/test_google_vision_engine.py`, 6/6 passing) - see the dedicated entry above; the sole recognition engine as of 2026-07-26.
 
-- Layer 9: `LowConfidenceFlagger` (`app/core/postprocessing/low_confidence_flagger.py`, `tests/test_low_confidence_flagger.py`, 5/5 passing, added 2026-07-30) - a pure function flagging words below `LOW_CONFIDENCE_THRESHOLD` (0.5, a starting heuristic like the heading-detection ratios - not yet measured against a real book), same "flags, never edits" contract as the rest of Layer 9. Called from `assemble_text_with_headings` (`app/core/export/text_exporter.py`), which wraps each flagged word's text between `LOW_CONFIDENCE_START`/`END` (`⟦`/`⟧`, chosen since they never occur in real Urdu/Arabic OCR text) - directly motivated by Section 2 rule 2 ("never guess ... flag it"), which previously had no enforcement: `RecognizedWord.confidence` was computed by `GoogleVisionEngine` but silently discarded after text assembly, with no way for a user to spot a likely-wrong word without re-reading the whole page. Unlike `HEADING_MARKER`, these markers are deliberately left **visible** in `output.txt` (`TextExporter` does not strip them) since plain text has no other way to carry the flag; `DocxExporter` strips the bracket characters and instead applies a yellow highlight to just the flagged run (`tests/test_docx_exporter.py`, new cases), splitting each paragraph into multiple runs so only the flagged word is highlighted, not the whole line - verified this composes correctly with heading formatting (a low-confidence word inside a heading line keeps both the highlight and the bold/Heading-1 styling). `assemble_text` (used for CER/WER benchmarking) deliberately does not call the flagger, for the same reason it never gets heading markers either - bracket characters would corrupt ground-truth comparison. **Not yet validated against a real book** - the 0.5 threshold's real precision/recall (how many flagged words are actually wrong, how many real errors go unflagged) is unmeasured; same caveat pattern as heading detection and the searchable-PDF exporter above.
+- Layer 9: `LowConfidenceFlagger` (`app/core/postprocessing/low_confidence_flagger.py`, `tests/test_low_confidence_flagger.py`, 5/5 passing, added 2026-07-30) - a pure function flagging words below `LOW_CONFIDENCE_THRESHOLD` (0.5, a starting heuristic like the heading-detection ratios - not yet measured against a real book), same "flags, never edits" contract as the rest of Layer 9. Called from `assemble_text_with_headings` (`app/core/export/text_exporter.py`), which wraps each flagged word's text between `LOW_CONFIDENCE_START`/`END` (`⟦`/`⟧`, chosen since they never occur in real Urdu/Arabic OCR text) - directly motivated by Section 2 rule 2 ("never guess ... flag it"), which previously had no enforcement: `RecognizedWord.confidence` was computed by `GoogleVisionEngine` but silently discarded after text assembly, with no way for a user to spot a likely-wrong word without re-reading the whole page. Unlike `HEADING_MARKER`, these markers are deliberately left **visible** in `output.txt` (`TextExporter` does not strip them) since plain text has no other way to carry the flag; `DocxExporter` strips the bracket characters and instead applies a yellow highlight to just the flagged run (`tests/test_docx_exporter.py`, new cases), splitting each paragraph into multiple runs so only the flagged word is highlighted, not the whole line - verified this composes correctly with heading formatting (a low-confidence word inside a heading line keeps both the highlight and the bold/Heading-1 styling). `assemble_text` (used for CER/WER benchmarking) deliberately does not call the flagger, for the same reason it never gets heading markers either - bracket characters would corrupt ground-truth comparison. **Partially validated against a real book, 2026-07-30** - see the "Real-book verification pass" writeup under the heading-detection section below: caught one confirmed real error (a bullet misread as a Thai character) and surfaced two real limitation categories confidence-based flagging structurally cannot catch. The 0.5 threshold's full precision/recall across a whole book is still unmeasured (Open item 3 below).
 - Layer 10: `TextExporter` (`app/core/export/text_exporter.py`, `tests/test_text_exporter.py`, 9/9 passing) - includes mechanical line assembly (Layer 9 is out of scope for the minimal pipeline; words already arrive ordered via `assign_reading_order`, called by the recognition engine).
 - Layer 10: `DocxExporter` (`app/core/export/docx_exporter.py`, `tests/test_docx_exporter.py`, 5/5 passing) - added on explicit user request; RTL paragraph/run formatting ported from the old `app/core/exporters/docx_exporter.py`. Wired into `app/simple_gui.py` behind a checkbox (on by default), writing alongside the `.txt` output, not replacing it. JSON export remains out of scope.
-- Layer 10: `SearchablePDFExporter` (`app/core/export/searchable_pdf_exporter.py`, `tests/test_searchable_pdf_exporter.py`, 8/8 passing, added 2026-07-30) - produces a PDF that looks like the page image already used for recognition (same DPI/grayscale rasterization the pipeline already does, nothing redrawn) with an invisible per-word text layer over it (`render_mode=3`), so the page is visually unchanged but text becomes selectable/searchable/copyable - the standard "OCR to searchable PDF" approach (same idea OCRmyPDF uses). Built entirely on `fitz`/PyMuPDF, already a dependency via `PDFLoader`/`PageRasterizer` - no new dependency needed. Encodes the invisible text layer using a real installed Nastaleeq font (`Jameel Noori Nastaleeq`, falling back to `tahoma`/`arial`/`times` if unavailable) searched by Arabic-glyph probe, so Unicode coverage (including diacritics/Quranic marks/Urdu-Indic numerals) is as complete as that font provides - not a proven-complete guarantee, since no bundled font ships with the project (Windows-only tool, per `pyproject.toml`, so relying on installed system fonts was an explicit scope call rather than embedding one). **Real bug found and fixed via the tests**: `fitz.Page.insert_text` lays glyphs out by simple left-to-right advance with no bidi/RTL reordering, so an RTL word's glyphs land in mirrored position order - `get_text()`'s own bidi-aware extraction then reversed that already-mirrored order back into character salad (`علم` extracted as `ملع`). Fixed by reversing each word's character order before insertion, which was verified end-to-end (not assumed) via `test_recognized_words_are_searchable_in_the_output` against a real font. Supports resuming into an already-partially-written PDF (`existing_path`, reopened from an in-memory byte buffer rather than the path directly, so a later save-to-the-same-path never hits a Windows file-lock error) - lets it participate in `app/simple_gui.py`'s existing checkpoint-every-50-pages mechanism the same way `TextExporter`/`DocxExporter` already do. Wired into `app/simple_gui.py`'s `OCRWorker` behind a checkbox (off by default, since it roughly doubles output file size per page - a full page image per page, same as any searchable-PDF tool). Verified end-to-end through the actual `OCRWorker._process_one_file` code path with a fake engine (no real API cost) against the real benchmark fixture, not just the exporter in isolation: output page count, page size (matches the original page's points exactly), embedded image, and extracted searchable text all verified correct. **Not yet validated against a real book's actual recognition output** (only synthetic words) - same caveat pattern as heading detection above; do that before trusting it on a large/costly batch.
+- Layer 10: `SearchablePDFExporter` (`app/core/export/searchable_pdf_exporter.py`, `tests/test_searchable_pdf_exporter.py`, 8/8 passing, added 2026-07-30) - produces a PDF that looks like the page image already used for recognition (same DPI/grayscale rasterization the pipeline already does, nothing redrawn) with an invisible per-word text layer over it (`render_mode=3`), so the page is visually unchanged but text becomes selectable/searchable/copyable - the standard "OCR to searchable PDF" approach (same idea OCRmyPDF uses). Built entirely on `fitz`/PyMuPDF, already a dependency via `PDFLoader`/`PageRasterizer` - no new dependency needed. Encodes the invisible text layer using a real installed Nastaleeq font (`Jameel Noori Nastaleeq`, falling back to `tahoma`/`arial`/`times` if unavailable) searched by Arabic-glyph probe, so Unicode coverage (including diacritics/Quranic marks/Urdu-Indic numerals) is as complete as that font provides - not a proven-complete guarantee, since no bundled font ships with the project (Windows-only tool, per `pyproject.toml`, so relying on installed system fonts was an explicit scope call rather than embedding one). **Real bug found and fixed via the tests**: `fitz.Page.insert_text` lays glyphs out by simple left-to-right advance with no bidi/RTL reordering, so an RTL word's glyphs land in mirrored position order - `get_text()`'s own bidi-aware extraction then reversed that already-mirrored order back into character salad (`علم` extracted as `ملع`). Fixed by reversing each word's character order before insertion, which was verified end-to-end (not assumed) via `test_recognized_words_are_searchable_in_the_output` against a real font. Supports resuming into an already-partially-written PDF (`existing_path`, reopened from an in-memory byte buffer rather than the path directly, so a later save-to-the-same-path never hits a Windows file-lock error) - lets it participate in `app/simple_gui.py`'s existing checkpoint-every-50-pages mechanism the same way `TextExporter`/`DocxExporter` already do. Wired into `app/simple_gui.py`'s `OCRWorker` behind a checkbox (off by default, since it roughly doubles output file size per page - a full page image per page, same as any searchable-PDF tool). Verified end-to-end through the actual `OCRWorker._process_one_file` code path with a fake engine (no real API cost) against the real benchmark fixture, not just the exporter in isolation: output page count, page size (matches the original page's points exactly), embedded image, and extracted searchable text all verified correct. **Validated against a real book's actual recognition output, 2026-07-30** - see the "Real-book verification pass" writeup under the heading-detection section below for details (3 real pages, real extracted searchable text confirmed).
 - Evaluation: `GroundTruthLoader` (`app/core/evaluation/ground_truth_loader.py`, 3/3 passing)
 - Evaluation: `CERCalculator` (`app/core/evaluation/cer_calculator.py`, 8/8 passing)
 - Evaluation: `WERCalculator` (`app/core/evaluation/wer_calculator.py`, 9/9 passing) - shares the Levenshtein implementation with `CERCalculator` via `app/core/evaluation/_edit_distance.py` rather than duplicating it
@@ -965,12 +965,37 @@ inspects the text" design. Covered by new test cases in
 isolated-but-full-width line, mirroring the two real false-positive
 shapes found, both now correctly excluded).
 
-**Not yet re-verified against a real book** - doing so requires another
-paid Google Vision conversion, which wasn't run as part of this fix. The
-diagnostic data above supports the fix (77%+ of the false positives were
-long lines the shortness gate would now exclude), but this is reasoning
-from the failure data, not a fresh measurement. Re-check the next real
-conversion's `.docx` before trusting this at scale.
+**Re-verified against a real book, 2026-07-30 - the fix holds.** Two
+full real books converted after the fix landed
+(`کلیات تحقیقات صابر ملتانی حصہ اول`/`حصہ دوم`, converted the same day
+this check was done) show 4.70-4.81% of paragraphs classified as
+headings, median heading length 16 characters, and only ~10% of flagged
+headings over 40 characters - a completely different, healthy
+distribution from the pre-fix `احیاء العلوم جلد (2)` numbers (9.3%,
+median 95 characters, 79% over 40 characters) still sitting in `Output/`
+as the original diagnostic sample. Sampled short headings are genuine
+titles (`دست یابی`, `جلد اول`, `بسم الله الرحمن الرحيم`), not footnotes or
+sentence fragments. Directly confirmed on one of these pages: a real
+section title (`ماہنامہ رجسٹریشن فرنٹ کا اجراء`) got `HEADING_MARKER`
+correctly applied, verified via the raw codepoint, not just visual
+inspection.
+
+**Caveat found during the same check**: `احیاء العلوم جلد (3)`/`جلد (4)`
+(also converted 2026-07-26, the same day as the fix) still show the
+*old*, bad distribution (8.89%/6.53%, median 92/42 chars, 51-81% over 40
+chars) - almost identical to the pre-fix pattern. The most likely
+explanation is not a fix regression: both are large books (~1000+ pages),
+and a from-source `git log` shows the fix commit landed at 16:12 that day
+while these files' timestamps (16:38, 17:00) are consistent with a
+conversion that was **already running** in a separate GUI process when
+the fix was committed - Python does not hot-reload a running process, so
+an in-progress conversion keeps using whatever code was imported when it
+started. Lesson for future changes to modules used by a long-running
+conversion: a code fix does not retroactively apply to a conversion
+already in flight, only to ones started afterward. If accurate headings
+matter for `جلد (3)`/`جلد (4)` specifically, they would need
+re-conversion under the fixed code - not done here, since that costs real
+API calls and wasn't asked for.
 
 **Also found and fixed while investigating this**: `Output/`
 (the folder holding real converted book text, deliberately gitignored per
@@ -982,8 +1007,71 @@ matched the exact-name `.gitignore` rule and left it **unprotected** - a
 an `Output*/` wildcard pattern to `.gitignore` alongside the exact-match
 one, so a similar future rename doesn't silently reopen this gap.
 
+### Real-book verification pass (2026-07-30): confidence flagging, searchable PDF, and an approximate accuracy spot-check
+
+Ran 3 real pages (indices 30/60/90) of `کلیات تحقیقات صابر ملتانی حصہ اول`
+(a real, clean, well-typeset scanned book, not the heavily-degraded
+synthetic fixture) through the actual pipeline - a small number of real
+Google Vision API calls, explicitly approved by the user for this purpose.
+
+**LowConfidenceFlagger caught a real error.** Page 30's second paragraph
+begins with a bullet character (`•`) in the source image; Google Vision
+misread it as the Thai letter `ข` - and `LOW_CONFIDENCE_THRESHOLD` (0.5)
+correctly flagged it (rendered as `⟦ข⟧` in the output). This is the first
+confirmed case of the flagger catching a genuine misrecognition on real
+data, not just a synthetic one. It also flagged a quotation mark around a
+heading title and a colon before a numbered list on the same three pages -
+both plausible genuine uncertainty, not obviously wrong flags.
+
+**A real error class the flagger structurally cannot catch**: page 60 has
+a numbered list using circled Urdu-Indic numerals (①②③ etc., rendered as
+dingbat-style glyphs in the source). Google Vision's output dropped every
+one of these markers entirely - not misrecognized, just absent - so
+`LowConfidenceFlagger` had nothing to flag (it only sees words that came
+back with a confidence score; it can't flag a word that was never
+produced at all). Same page also had one real misrecognition (`ردعمل`
+read as `رو حمل`) that came back at a confidence high enough not to be
+flagged. Both are genuine limits of any confidence-based approach, not
+implementation bugs - worth remembering before treating "nothing flagged"
+as "definitely correct."
+
+**`SearchablePDFExporter` verified against real pages.** All 3 pages
+produced a real `.pdf` with the original page image visible and real
+searchable text (2856-3370 characters extracted per page via
+`fitz`'s `get_text()`), through the same `SearchablePDFExporter` class
+exercised in `tests/test_searchable_pdf_exporter.py`, now confirmed against
+real Google Vision word/bbox output, not just synthetic test words.
+
+**Approximate accuracy spot-check (not a certified CER/WER measurement)**:
+visually cross-checked page 30's Google Vision output against the source
+image line-by-line. Aside from the two issues above, the transcription
+matched what's visible on the page essentially verbatim across ~25 lines
+of body text - qualitatively a much lower error rate than the synthetic
+benchmark fixture's measured 9.2-10.8% CER, consistent with this being a
+clean, well-printed scan rather than the fixture's deliberately-degraded
+one. This is a rough, non-independent cross-check (the same person/model
+reading the scan already knew the OCR output first, so it isn't a blind
+comparison) and should not be treated as a substitute for a real
+CER/WER number - see open item 5 below.
+
+**Also checked as a side effect**: the source folder for this book
+includes an Archive.org-generated `_text.pdf` with its own OCR text
+layer. Extracted and compared - it is unusable gibberish for this
+Nastaleeq page (reversed/scrambled character runs, not real Urdu), which
+independently reinforces this project's own earlier finding (Section 6,
+`PaddleOCREngine`/engine-comparison table) that generic/non-Nastaleeq-aware
+OCR fails on this script family; not incorporated anywhere, purely a
+sanity-check data point.
+
+All page images and intermediate text used for this check were deleted
+immediately after (`.real_book_verify/`, now also added to `.gitignore` as
+a precaution) - they are real private book content and were never meant
+to persist on disk longer than the check itself, per Section 2's privacy
+rules.
+
 **Open items:**
-1. Google Document AI comparison test - explicitly deferred by the user pending "make current setup better" work; revisit when there's time to spend on it.
-2. `SearchablePDFExporter` has not yet been checked against a real book's actual recognition output, only synthetic test words (see its Section 9 entry) - re-check the next real conversion's `.pdf` output (text actually searchable/copyable in a real PDF viewer, diacritics/numerals intact) before trusting it at scale, same discipline as every other unmeasured heuristic in this document.
-3. `LowConfidenceFlagger`'s `LOW_CONFIDENCE_THRESHOLD` (0.5) is an unmeasured starting value (see its Section 9 entry) - check a real book's flagged words to see whether 0.5 catches real errors without flooding the output with false flags on merely-average-confidence-but-correct words.
-4. Heading-detection calibration across different books - `HEADING_HEIGHT_RATIO` (1.5x), `HEADING_GAP_RATIO` (2.0x), and `HEADING_MAX_WIDTH_RATIO` (0.6x, added after the first real-book test found a 9.3% false-positive rate - see the dedicated section above) are all tuned by reasoning, not full measurement. The first real-book test already validated the shortness gate's *direction* (most false positives were long lines it would exclude) but the fix itself hasn't been re-verified against a fresh conversion yet - do that before trusting this on a large/costly batch. Explicit user acknowledgment (2026-07-26): expect this needs revisiting per-book as real conversions are checked, not treated as solved. If height+isolation+shortness still proves insufficient on some book, a line being centered rather than left/right-aligned with the body-text column is another geometric signal available and not yet used - or, as a heavier last resort, true bold detection via cropping each line from the actual page image and measuring stroke thickness/ink density (considered and explicitly declined for now - see the dedicated section above).
+1. Google Document AI comparison test - explicitly deferred by the user pending "make current setup better" work; revisit when there's time to spend on it. Still not run as of the 2026-07-30 real-book verification pass (the user approved only the SearchablePDFExporter cloud check that session, not this one).
+2. ~~`SearchablePDFExporter` has not yet been checked against a real book's actual recognition output~~ **Done, 2026-07-30** - see the real-book verification pass above; 3 real pages produced real, extraction-verified searchable PDFs.
+3. `LowConfidenceFlagger`'s `LOW_CONFIDENCE_THRESHOLD` (0.5) - the 2026-07-30 real-book pass found one confirmed true positive (a bullet misread as a Thai character) and surfaced two real limitation categories (dropped/omitted glyphs and high-confidence-but-wrong misrecognitions, neither of which any confidence-based flag can catch - see the dedicated writeup above) but did not do a full precision/recall count across a whole book. Still open: check a full real book's flagged-word rate to see whether 0.5 floods the output with false flags on merely-average-confidence-but-correct words.
+4. Heading-detection calibration across different books - `HEADING_HEIGHT_RATIO` (1.5x), `HEADING_GAP_RATIO` (2.0x), and `HEADING_MAX_WIDTH_RATIO` (0.6x, added after the first real-book test found a 9.3% false-positive rate - see the dedicated section above) are all tuned by reasoning, not full measurement. **Partially resolved, 2026-07-30**: re-verified against two real books converted after the fix (`کلیات تحقیقات صابر ملتانی` حصہ اول/دوم) and the distribution is healthy (~4.7-4.8% flagged, genuine short titles) - see the dedicated writeup above. Still open: `احیاء العلوم جلد (3)`/`جلد (4)` still show the old bad distribution, most likely because those conversions were already running when the fix landed (see above) - would need re-conversion to get accurate headings, not done. Explicit user acknowledgment (2026-07-26): expect this needs revisiting per-book as real conversions are checked, not treated as solved. If height+isolation+shortness still proves insufficient on some book, a line being centered rather than left/right-aligned with the body-text column is another geometric signal available and not yet used - or, as a heavier last resort, true bold detection via cropping each line from the actual page image and measuring stroke thickness/ink density (considered and explicitly declined for now - see the dedicated section above).
+5. A certified real-book CER/WER measurement still does not exist. The 2026-07-30 verification pass included an approximate visual spot-check (see above) that suggested real accuracy is meaningfully better than the synthetic fixture's measured 9.2-10.8% CER, but that check is not independent (the same reader saw the OCR output before cross-checking) and is not a substitute for a real number. Doing this properly needs a genuinely blind ground truth - e.g. a human transcription done without seeing the OCR output first - run through the existing `CERCalculator`/`WERCalculator` infrastructure (already built, just never pointed at real-book ground truth).
