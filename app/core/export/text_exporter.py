@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from app.core.export.heading_classifier import classify_headings
+from app.core.postprocessing.low_confidence_flagger import flag_low_confidence
 from app.core.recognition.recognized_word import RecognizedWord
 
 # Punctuation marks that attach directly to the preceding word with no
@@ -34,6 +35,18 @@ _NO_LEADING_SPACE = set("۔،؟!:؛.,?!;:")
 HEADING_MARKER = ""
 
 
+# Wrap a low-confidence word's text between these two (see
+# assemble_text_with_headings) - mathematical white square brackets, chosen
+# because they don't occur in real Urdu/Arabic OCR text, so they can't be
+# confused with genuine punctuation. Unlike HEADING_MARKER these are left
+# VISIBLE in output.txt on purpose: Section 2 rule 2 requires low-confidence
+# recognition to be flagged, and plain .txt has no other way to carry that
+# signal. DocxExporter converts them into a highlighted run instead of
+# visible brackets, since .docx has real formatting to carry the same flag.
+LOW_CONFIDENCE_START = "⟦"
+LOW_CONFIDENCE_END = "⟧"
+
+
 def _group_lines(words: list[RecognizedWord]) -> list[list[RecognizedWord]]:
     lines: dict[int, list[RecognizedWord]] = {}
     for word in words:
@@ -41,13 +54,15 @@ def _group_lines(words: list[RecognizedWord]) -> list[list[RecognizedWord]]:
     return [lines[i] for i in sorted(lines)]
 
 
-def _join_line(line_words: list[RecognizedWord]) -> str:
+def _join_line(line_words: list[RecognizedWord], flags: list[bool] | None = None) -> str:
     parts: list[str] = []
-    for word in line_words:
+    flags = flags or [False] * len(line_words)
+    for word, flagged in zip(line_words, flags):
+        text = f"{LOW_CONFIDENCE_START}{word.text}{LOW_CONFIDENCE_END}" if flagged else word.text
         if parts and word.text in _NO_LEADING_SPACE:
-            parts[-1] += word.text
+            parts[-1] += text
         else:
-            parts.append(word.text)
+            parts.append(text)
     return " ".join(parts)
 
 
@@ -63,16 +78,32 @@ def assemble_text(words: list[RecognizedWord]) -> str:
 def assemble_text_with_headings(words: list[RecognizedWord]) -> str:
     """Same as assemble_text, but prefixes each line classified as a
     heading (by app.core.export.heading_classifier, purely from relative
-    line height) with HEADING_MARKER."""
+    line height) with HEADING_MARKER, and wraps each word flagged as
+    low-confidence (by app.core.postprocessing.low_confidence_flagger,
+    purely from the engine's own per-word confidence score) between
+    LOW_CONFIDENCE_START/END."""
     if not words:
         return ""
     lines = _group_lines(words)
     is_heading = classify_headings(lines)
+    low_confidence = flag_low_confidence(words)
+    line_flags = _group_lines_of(low_confidence, words)
     text_lines = [
-        (HEADING_MARKER if heading else "") + _join_line(line)
-        for line, heading in zip(lines, is_heading)
+        (HEADING_MARKER if heading else "") + _join_line(line, flags)
+        for line, heading, flags in zip(lines, is_heading, line_flags)
     ]
     return "\n".join(text_lines)
+
+
+def _group_lines_of(values: list[bool], words: list[RecognizedWord]) -> list[list[bool]]:
+    """Regroups a flat per-word value list (aligned with `words`) using the
+    same line_index grouping _group_lines uses, so a value list computed
+    once over the flat word order (as flag_low_confidence's contract
+    requires) can be zipped against the already-grouped `lines`."""
+    grouped: dict[int, list[bool]] = {}
+    for word, value in zip(words, values):
+        grouped.setdefault(word.line_index, []).append(value)
+    return [grouped[i] for i in sorted(grouped)]
 
 
 class TextExporter:

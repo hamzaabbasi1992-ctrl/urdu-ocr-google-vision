@@ -8,6 +8,8 @@ from pathlib import Path
 
 from app.core.export.text_exporter import (
     HEADING_MARKER,
+    LOW_CONFIDENCE_END,
+    LOW_CONFIDENCE_START,
     TextExporter,
     assemble_text,
     assemble_text_with_headings,
@@ -15,8 +17,8 @@ from app.core.export.text_exporter import (
 from app.core.recognition.recognized_word import RecognizedWord
 
 
-def _word(text: str, line_index: int) -> RecognizedWord:
-    return RecognizedWord(text=text, confidence=1.0, x0=0, y0=0, x1=1, y1=1, line_index=line_index)
+def _word(text: str, line_index: int, confidence: float = 1.0) -> RecognizedWord:
+    return RecognizedWord(text=text, confidence=confidence, x0=0, y0=0, x1=1, y1=1, line_index=line_index)
 
 
 def _word_h(text: str, line_index: int, height: float, width: float = 100.0) -> RecognizedWord:
@@ -103,3 +105,36 @@ def test_export_strips_heading_marker_before_writing(tmp_path: Path) -> None:
     path = tmp_path / "output.txt"
     TextExporter().export(f"{HEADING_MARKER}Title\nbody", path)
     assert path.read_text(encoding="utf-8-sig") == "Title\nbody"
+
+
+def test_assemble_text_with_headings_wraps_low_confidence_word() -> None:
+    words = [_word("good", 0, confidence=0.95), _word("bad", 0, confidence=0.1)]
+    result = assemble_text_with_headings(words)
+    assert result == f"good {LOW_CONFIDENCE_START}bad{LOW_CONFIDENCE_END}"
+
+
+def test_assemble_text_with_headings_no_wrap_for_confident_words() -> None:
+    words = [_word("a", 0, confidence=0.9), _word("b", 0, confidence=0.6)]
+    result = assemble_text_with_headings(words)
+    assert LOW_CONFIDENCE_START not in result
+    assert result == "a b"
+
+
+def test_assemble_text_never_wraps_low_confidence_words() -> None:
+    """assemble_text (used for CER/WER benchmarking) must stay pure OCR
+    output - confidence bracket markers would corrupt ground-truth comparison."""
+    words = [_word("bad", 0, confidence=0.0)]
+    assert assemble_text(words) == "bad"
+
+
+def test_low_confidence_punctuation_still_attaches_without_space() -> None:
+    words = [_word("ہے", 0, confidence=0.95), _word("۔", 0, confidence=0.1)]
+    result = assemble_text_with_headings(words)
+    assert result == f"ہے{LOW_CONFIDENCE_START}۔{LOW_CONFIDENCE_END}"
+
+
+def test_export_leaves_low_confidence_markers_visible(tmp_path: Path) -> None:
+    path = tmp_path / "output.txt"
+    text = f"good {LOW_CONFIDENCE_START}bad{LOW_CONFIDENCE_END}"
+    TextExporter().export(text, path)
+    assert path.read_text(encoding="utf-8-sig") == text
