@@ -81,6 +81,7 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QSettings, Qt, QThread, Signal
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QComboBox,
     QFileDialog,
@@ -88,6 +89,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -453,6 +455,18 @@ class MainWindow(QWidget):
         input_row.addWidget(input_button)
         input_row.addWidget(self.input_label, 1)
 
+        # --- multi-file queue (multi-file mode only) - lets a file picked
+        # by mistake be dropped before Run OCR without redoing the whole
+        # selection ---
+        self.file_queue_list = QListWidget()
+        self.file_queue_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.remove_from_queue_button = QPushButton("Remove Selected From Queue")
+        self.remove_from_queue_button.clicked.connect(self._remove_selected_from_queue)
+
+        queue_row = QHBoxLayout()
+        queue_row.addWidget(self.file_queue_list, 1)
+        queue_row.addWidget(self.remove_from_queue_button, alignment=Qt.AlignTop)
+
         # --- page range (single-file mode only) ---
         self.page_range_label = QLabel("Pages:")
         self.start_page_spin = QSpinBox()
@@ -591,6 +605,7 @@ class MainWindow(QWidget):
         layout.addWidget(cloud_notice)
         layout.addLayout(mode_row)
         layout.addLayout(input_row)
+        layout.addLayout(queue_row)
         layout.addLayout(page_range_row)
         layout.addWidget(self.split_spread_checkbox)
         layout.addLayout(output_folder_row)
@@ -668,11 +683,15 @@ class MainWindow(QWidget):
         self._input_page_count = None
         self.input_label.setText("Nothing selected")
         is_single = self.single_file_radio.isChecked()
+        is_multi = self.multi_file_radio.isChecked()
         self.output_name_edit.setEnabled(is_single)
         self.page_range_label.setEnabled(is_single)
         self.start_page_spin.setEnabled(is_single)
         self.end_page_spin.setEnabled(is_single)
         self.page_count_label.setText("")
+        self.file_queue_list.clear()
+        self.file_queue_list.setVisible(is_multi)
+        self.remove_from_queue_button.setVisible(is_multi)
         self._reset_run_button_to_fresh_job()
         self._update_run_enabled()
 
@@ -707,11 +726,37 @@ class MainWindow(QWidget):
             if path_strs:
                 self._input_paths = [Path(p) for p in path_strs]
                 self._remember_input_dir(self._input_paths[0])
-                names = ", ".join(p.name for p in self._input_paths[:3])
-                if len(self._input_paths) > 3:
-                    names += f", +{len(self._input_paths) - 3} more"
-                self.input_label.setText(f"{len(self._input_paths)} file(s) selected: {names}")
+                self._refresh_file_queue()
                 self._reset_run_button_to_fresh_job()
+        self._update_run_enabled()
+
+    def _refresh_file_queue(self) -> None:
+        """Rebuilds the queue list widget and summary label from
+        self._input_paths - called after picking files and after removing
+        some from the queue, so both stay in sync."""
+        self.file_queue_list.clear()
+        if not self._input_paths:
+            self.input_label.setText("Nothing selected")
+            return
+        self.file_queue_list.addItems(p.name for p in self._input_paths)
+        for row, path in enumerate(self._input_paths):
+            self.file_queue_list.item(row).setToolTip(str(path))
+        names = ", ".join(p.name for p in self._input_paths[:3])
+        if len(self._input_paths) > 3:
+            names += f", +{len(self._input_paths) - 3} more"
+        self.input_label.setText(f"{len(self._input_paths)} file(s) selected: {names}")
+
+    def _remove_selected_from_queue(self) -> None:
+        if not self._input_paths:
+            return
+        selected_rows = sorted(
+            {self.file_queue_list.row(item) for item in self.file_queue_list.selectedItems()}, reverse=True
+        )
+        if not selected_rows:
+            return
+        for row in selected_rows:
+            del self._input_paths[row]
+        self._refresh_file_queue()
         self._update_run_enabled()
 
     def _load_page_count(self) -> None:
@@ -876,6 +921,8 @@ class MainWindow(QWidget):
         self.status_label.setText(f"{pdf_name}: starting ({total_pages} page(s))...")
         if self.single_file_radio.isChecked():
             self.text_view.clear()
+        else:
+            self.text_view.append(f"=== {pdf_name} ===")
 
     def _on_page_done(self, current: int, total: int) -> None:
         self.progress_bar.setMaximum(total)
@@ -884,7 +931,12 @@ class MainWindow(QWidget):
     def _on_page_recognized(self, current: int, total: int, text: str) -> None:
         # Usage is counted from api_call_made, not inferred here - correct
         # regardless of split-spread mode doubling calls per page.
-        if self.single_file_radio.isChecked():
+        # Shown live in every input mode (previously single-file only,
+        # which made folder/multi-file batches look frozen page-to-page -
+        # only a "Saved: ..." line appeared once a whole file finished).
+        if current == 0 and total == 0:
+            self.text_view.append(f"{text}\n")
+        else:
             self.text_view.append(f"--- Page {current}/{total} ---\n{text}\n")
 
     def _on_file_done(self, pdf_name: str, output_path: str) -> None:
@@ -900,6 +952,12 @@ class MainWindow(QWidget):
         self.run_button.setText("Run OCR")
         self.run_button.setEnabled(True)
         self.pause_button.setEnabled(False)
+        # Auto-untick after a full completion (not after pause/fail, which
+        # need the same setting to resume correctly via the checkpoint) -
+        # a book converted with this on is the exception, not the default,
+        # and leaving it ticked silently carried it into unrelated later
+        # jobs (a whole folder batch got wrongly split this way once).
+        self.split_spread_checkbox.setChecked(False)
 
     def _on_stopped(self) -> None:
         self.status_label.setText("Paused - pages processed so far were saved. Click Resume to continue.")
