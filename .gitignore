@@ -4,6 +4,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+*.spec
 *.log
 tools/test_output/
 tools/synthetic_test.pdf
