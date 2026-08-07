@@ -435,9 +435,16 @@ used by `QaariVLMEngine` for model cache location; `app/core/paths.py` was
 itself deleted the next day when `QaariVLMEngine` was removed - see the next
 note below). `pyproject.toml`'s `[project.scripts]` entry point updated from
 `app.main:main` to `app.simple_gui:main` accordingly. The GUI is now
-exclusively `app/simple_gui.py` (launched via `Start Google Vision GUI.bat`);
-the old `Start.bat` launcher for the deleted `app.main`/`app.gui` was removed
-with it.
+exclusively `app/simple_gui.py` (launched via `Start Google Vision GUI.bat`
+during active development - always reflects the latest code, no rebuild
+needed); the old `Start.bat` launcher for the deleted `app.main`/`app.gui`
+was removed with it. **A second, standalone launch path was added
+2026-08-01**: `run_app.py` + `Build EXE.bat` produce a windowed, one-file
+PyInstaller exe (`dist/Urdu OCR (Google Vision).exe`) for end use once a
+round of edits is finished - it's a frozen snapshot, so it must be rebuilt
+after every code change to stay current; the `.bat` stays the source of
+truth while editing. `dist/`, `build/`, `*.spec` are gitignored (build
+output, regenerate via `Build EXE.bat` rather than trusting a stale copy).
 
 **Paddle/Qaari/UTRNet engines removed (2026-07-26).** With `GoogleVisionEngine`
 established as the working, sole engine, the user asked to remove
@@ -1069,9 +1076,42 @@ a precaution) - they are real private book content and were never meant
 to persist on disk longer than the check itself, per Section 2's privacy
 rules.
 
+**Split-spread checkbox left on across a whole folder batch, corrupting ~39
+books (found and fixed 2026-08-01).** `split_spread_checkbox` in
+`app/simple_gui.py` persisted via `QSettings` with no reset between runs.
+The user ticked it for one real 2-page-spread book, forgot to untick it,
+then ran a folder-mode batch of 39 normal single-page books from
+`F:\mphil k.u 2025\05 books` (10,568 pages total) into
+`Output/طب اور اسلام/`. Verified directly against several of those output
+`.txt` files: mid-word truncation and duplicated boilerplate/watermark
+text on every page - each normal full-width page was being cut in half
+and each half sent to Vision as its own image, with no positional data
+kept anywhere in the plain-text export to reconstruct correct reading
+order afterwards. Confirmed no clean duplicate of any of these 39 books
+exists in `F:\ISLAMIC RESEARCH HUB AI\library` either. Fix: the checkbox
+now auto-unticks in `_on_all_done` after a full run completes (not after
+pause/fail, which need the same setting to resume via the checkpoint).
+**Re-conversion of all 39 books has not been done yet** - this is
+diagnosis + a fix to stop recurrence, not a redo of the corrupted output;
+see Open item 6 below. Same session: live per-page text now shows in
+folder/multi-file GUI modes too (previously single-file-only), and
+multi-file mode gained a "Remove Selected From Queue" list so a
+wrongly-picked file doesn't force redoing the whole selection.
+
+**Migrated to a new machine (2026-08-01).** Moved by copy-pasting just the
+project folder (minus `.venv`), the credentials-key folder, and Claude's
+own project history folder to the new machine - `.venv` was rebuilt from
+`requirements.txt`/`requirements-dev.txt` there (see the exe-launch note
+above for what else changed that day). Local `QSettings`
+(`HKCU\Software\UrduOCR\SimpleGoogleVisionGUI` - credentials path, output
+folder, usage counter) does not travel with a folder copy since it's the
+registry, not a file; had to be re-entered once in the GUI on the new
+machine.
+
 **Open items:**
 1. Google Document AI comparison test - explicitly deferred by the user pending "make current setup better" work; revisit when there's time to spend on it. Still not run as of the 2026-07-30 real-book verification pass (the user approved only the SearchablePDFExporter cloud check that session, not this one).
 2. ~~`SearchablePDFExporter` has not yet been checked against a real book's actual recognition output~~ **Done, 2026-07-30** - see the real-book verification pass above; 3 real pages produced real, extraction-verified searchable PDFs.
 3. `LowConfidenceFlagger`'s `LOW_CONFIDENCE_THRESHOLD` (0.5) - the 2026-07-30 real-book pass found one confirmed true positive (a bullet misread as a Thai character) and surfaced two real limitation categories (dropped/omitted glyphs and high-confidence-but-wrong misrecognitions, neither of which any confidence-based flag can catch - see the dedicated writeup above) but did not do a full precision/recall count across a whole book. Still open: check a full real book's flagged-word rate to see whether 0.5 floods the output with false flags on merely-average-confidence-but-correct words.
 4. Heading-detection calibration across different books - `HEADING_HEIGHT_RATIO` (1.5x), `HEADING_GAP_RATIO` (2.0x), and `HEADING_MAX_WIDTH_RATIO` (0.6x, added after the first real-book test found a 9.3% false-positive rate - see the dedicated section above) are all tuned by reasoning, not full measurement. **Partially resolved, 2026-07-30**: re-verified against two real books converted after the fix (`کلیات تحقیقات صابر ملتانی` حصہ اول/دوم) and the distribution is healthy (~4.7-4.8% flagged, genuine short titles) - see the dedicated writeup above. Still open: `احیاء العلوم جلد (3)`/`جلد (4)` still show the old bad distribution, most likely because those conversions were already running when the fix landed (see above) - would need re-conversion to get accurate headings, not done. Explicit user acknowledgment (2026-07-26): expect this needs revisiting per-book as real conversions are checked, not treated as solved. If height+isolation+shortness still proves insufficient on some book, a line being centered rather than left/right-aligned with the body-text column is another geometric signal available and not yet used - or, as a heavier last resort, true bold detection via cropping each line from the actual page image and measuring stroke thickness/ink density (considered and explicitly declined for now - see the dedicated section above).
 5. A certified real-book CER/WER measurement still does not exist. The 2026-07-30 verification pass included an approximate visual spot-check (see above) that suggested real accuracy is meaningfully better than the synthetic fixture's measured 9.2-10.8% CER, but that check is not independent (the same reader saw the OCR output before cross-checking) and is not a substitute for a real number. Doing this properly needs a genuinely blind ground truth - e.g. a human transcription done without seeing the OCR output first - run through the existing `CERCalculator`/`WERCalculator` infrastructure (already built, just never pointed at real-book ground truth).
+6. **Re-convert the 39 split-spread-corrupted books** (see the dedicated 2026-08-01 writeup above) - source PDFs at `F:\mphil k.u 2025\05 books` (39 files, 10,568 pages), faulty output at `Output/طب اور اسلام/`. Not started. Credentials/pipeline already smoke-tested successfully (single real page recognized, 537 words) ahead of doing this; the monthly local usage-warning threshold was raised from 1,000 to 200,000 pages the same day specifically so this job doesn't trip the free-tier confirmation dialog.
